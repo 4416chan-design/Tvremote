@@ -416,11 +416,7 @@ class RemoteViewModel(
         if (!ensureConnectedOrPrompt()) return
         viewModelScope.launch {
             runCatching {
-                if (keyCode == TvKeyCodes.ALL_APPS) {
-                    remoteClient.sendPressAndReleaseKey(keyCode)
-                } else {
-                    remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT)
-                }
+                remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT)
             }.onFailure { showMessage(it.message ?: "명령 전송 실패") }
         }
     }
