@@ -100,11 +100,37 @@ class MainActivity : ComponentActivity() {
                     viewModel.clearSnackbar()
                 }
 
-                // On-device SpeechRecognizer for the Mic button
+                // On-device SpeechRecognizer fallback (used only when TV does not open RemoteVoiceBegin)
                 val speechRecognizer = remember(context) {
                     if (SpeechRecognizer.isRecognitionAvailable(context)) {
                         SpeechRecognizer.createSpeechRecognizer(context)
                     } else null
+                }
+
+                fun launchSpeechRecognizerFallback() {
+                    if (speechRecognizer == null) {
+                        viewModel.setVoiceListening(false)
+                        viewModel.showMessage("TV 음성 스트리밍 응답이 없고 기기 음성 인식기도 사용할 수 없습니다.")
+                        return
+                    }
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
+                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                        putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+                    }
+                    viewModel.setVoiceListening(true)
+                    runCatching { speechRecognizer.startListening(intent) }
+                        .onFailure {
+                            viewModel.setVoiceListening(false)
+                            viewModel.showMessage("음성 인식을 시작할 수 없습니다: ${it.message}")
+                        }
+                }
+
+                LaunchedEffect(viewModel) {
+                    viewModel.voiceFallbackRequests.collect {
+                        launchSpeechRecognizerFallback()
+                    }
                 }
 
                 DisposableEffect(speechRecognizer) {
@@ -120,13 +146,20 @@ class MainActivity : ComponentActivity() {
                         }
                         override fun onError(error: Int) {
                             viewModel.setVoiceListening(false)
-                            if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                                viewModel.showMessage("음성을 인식하지 못했습니다. 다시 시도해 주세요.")
-                            } else {
-                                viewModel.onVoiceSearchFallbackKey()
+                            val msg = when (error) {
+                                SpeechRecognizer.ERROR_NO_MATCH,
+                                SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "음성을 인식하지 못했습니다. 다시 시도해 주세요."
+                                SpeechRecognizer.ERROR_AUDIO,
+                                SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "마이크 권한 또는 오디오 입력을 확인해 주세요."
+                                SpeechRecognizer.ERROR_NETWORK,
+                                SpeechRecognizer.ERROR_NETWORK_TIMEOUT,
+                                SpeechRecognizer.ERROR_SERVER -> "음성 인식 서버 연결 오류입니다."
+                                else -> "음성 인식 실패 (코드: $error)"
                             }
+                            viewModel.showMessage(msg)
                         }
                         override fun onResults(results: Bundle?) {
+                            viewModel.setVoiceListening(false)
                             val spoken = results
                                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                                 ?.firstOrNull()
@@ -141,32 +174,14 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                fun launchVoiceSearch() {
-                    if (speechRecognizer == null) {
-                        viewModel.onVoiceSearchFallbackKey()
-                        return
-                    }
-                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ko-KR")
-                        putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                    }
-                    viewModel.setVoiceListening(true)
-                    runCatching { speechRecognizer.startListening(intent) }
-                        .onFailure {
-                            viewModel.setVoiceListening(false)
-                            viewModel.onVoiceSearchFallbackKey()
-                        }
-                }
-
                 val micPermissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission()
                 ) { granted ->
                     if (granted) {
-                        launchVoiceSearch()
+                        viewModel.startVoiceSession()
                     } else {
-                        viewModel.showMessage("마이크 권한이 거부되어 TV 음성 도우미 키를 전송합니다.")
-                        viewModel.onVoiceSearchFallbackKey()
+                        viewModel.showMessage("마이크 권한이 거부되어 TV 음성 어시스턴트 키만 전송합니다.")
+                        viewModel.sendKey(com.example.data.model.TvKeyCodes.VOICE_ASSIST)
                     }
                 }
 
@@ -182,10 +197,10 @@ class MainActivity : ComponentActivity() {
                     ) == PackageManager.PERMISSION_GRANTED
                     if (hasAudioPermission) {
                         if (isVoiceListening) {
+                            viewModel.stopVoiceSession(sendEndPacket = true)
                             speechRecognizer?.stopListening()
-                            viewModel.setVoiceListening(false)
                         } else {
-                            launchVoiceSearch()
+                            viewModel.startVoiceSession()
                         }
                     } else {
                         micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)

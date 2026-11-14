@@ -103,6 +103,18 @@ fun KeyboardInputSheet(
         }
     }
 
+    LaunchedEffect(fieldValue.text, liveSyncMode) {
+        if (liveSyncMode && fieldValue.text != lastSyncedCommittedText) {
+            if (fieldValue.composition != null) {
+                kotlinx.coroutines.delay(160)
+            }
+            if (fieldValue.text != lastSyncedCommittedText) {
+                lastSyncedCommittedText = fieldValue.text
+                onSendText(fieldValue.text, true, false)
+            }
+        }
+    }
+
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
     }
@@ -140,9 +152,9 @@ fun KeyboardInputSheet(
                         color = TextPrimary
                     )
                     val statusText = when {
-                        isAdbConnected && isTvImeVisible -> "ADB + TV 입력창 연결됨"
-                        isAdbConnected -> "ADB 연결됨 (영문/숫자/Enter 직접 전송)"
-                        isTvImeVisible -> "TV 입력창 연결됨"
+                        isTvImeVisible && isAdbConnected -> "TV 입력창 · ADB 연결됨 (한글/영문 지원)"
+                        isTvImeVisible -> "TV 입력창 연결됨 (한글/영문 지원)"
+                        isAdbConnected -> "ADB 연결됨 (TV 입력창 미열림 · 영문 직접 전송)"
                         else -> "TV에서 검색창을 먼저 선택하세요"
                     }
                     Text(
@@ -207,10 +219,6 @@ fun KeyboardInputSheet(
                 onValueChange = { next ->
                     userEditedLocally = true
                     fieldValue = next
-                    if (liveSyncMode && next.composition == null && next.text != lastSyncedCommittedText) {
-                        lastSyncedCommittedText = next.text
-                        onSendText(next.text, true, false)
-                    }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
@@ -240,8 +248,9 @@ fun KeyboardInputSheet(
                 ),
                 keyboardActions = KeyboardActions(
                     onSend = {
-                        onSendText(fieldValue.text, true, true)
+                        fieldValue = fieldValue.copy(composition = null)
                         lastSyncedCommittedText = fieldValue.text
+                        onSendText(fieldValue.text, true, true)
                     }
                 )
             )
@@ -290,8 +299,9 @@ fun KeyboardInputSheet(
                 val hasText = fieldValue.text.isNotEmpty()
                 Button(
                     onClick = {
-                        onSendText(fieldValue.text, true, true)
+                        fieldValue = fieldValue.copy(composition = null)
                         lastSyncedCommittedText = fieldValue.text
+                        onSendText(fieldValue.text, true, true)
                     },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (hasText) MintGreen else CharcoalSurfaceElevated,

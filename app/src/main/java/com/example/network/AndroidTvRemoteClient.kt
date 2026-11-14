@@ -23,10 +23,13 @@ import javax.net.ssl.SSLSocket
  * app link launches, and Korean/English IME text batch edits.
  */
 class AndroidTvRemoteClient(
-    private val certStore: ClientCertStore,
+    private val certStore: ClientCertStore?,
     private val onForegroundAppChanged: (String) -> Unit,
     private val onImeShowRequested: (fieldCounter: Int, text: String) -> Unit,
+    private val onImeHidden: () -> Unit = {},
     private val onVolumeChanged: (level: Int, max: Int, muted: Boolean) -> Unit,
+    private val onVoiceBeginRequested: (sessionId: Int, packageName: String?) -> Unit = { _, _ -> },
+    private val onVoiceEndRequested: (sessionId: Int) -> Unit = { _ -> },
     private val onRemoteError: (code: Int, detail: String?) -> Unit = { _, _ -> },
     private val onDisconnected: (Throwable?) -> Unit
 ) {
@@ -48,16 +51,40 @@ class AndroidTvRemoteClient(
     private var trackedTvText: String = ""
 
     @Volatile
+    private var trackedSelStart: Int = 0
+
+    @Volatile
+    private var trackedSelEnd: Int = 0
+
+    @Volatile
+    private var lastImeAppPackage: String? = null
+
+    @Volatile
+    private var currentForegroundPackage: String? = null
+
+    @Volatile
+    var isImeFieldActive: Boolean = false
+        private set
+
+    @Volatile
     var isConnected: Boolean = false
         private set
 
+    internal val debugImeCounter: Int
+        get() = imeCounter
+
+    internal val debugFieldCounter: Int
+        get() = fieldCounter
+
+    internal val debugTrackedText: String
+        get() = trackedTvText
+
     suspend fun connect(host: String, remotePort: Int) = withContext(Dispatchers.IO) {
         disconnect(notify = false)
-        imeCounter = 0
-        fieldCounter = 0
-        trackedTvText = ""
+        resetImeState()
 
-        val sslContext = certStore.createSslContext()
+        val store = requireNotNull(certStore) { "ClientCertStore is required for TLS connection" }
+        val sslContext = store.createSslContext()
         val sslSocket = (sslContext.socketFactory.createSocket() as SSLSocket).apply {
             soTimeout = 30_000
             connect(InetSocketAddress(host, remotePort), 8_000)
@@ -164,6 +191,13 @@ class AndroidTvRemoteClient(
                     val appInfo = imeFields.firstOrNull { it.number == 1 }?.asMessage()
                     val pkg = appInfo?.firstOrNull { it.number == 3 }?.asString()
                     if (!pkg.isNullOrBlank()) {
+                        val previousPkg = currentForegroundPackage
+                        currentForegroundPackage = pkg
+                        if (isImeFieldActive && previousPkg != null && previousPkg != pkg && lastImeAppPackage != pkg) {
+                            isImeFieldActive = false
+                            lastImeAppPackage = null
+                            onImeHidden()
+                        }
                         onForegroundAppChanged(pkg)
                     }
                     val textStatus = imeFields.firstOrNull { it.number == 2 }?.asMessage()
@@ -177,14 +211,29 @@ class AndroidTvRemoteClient(
                 }
                 22 -> { // remote_ime_show_request
                     val showFields = field.asMessage()
-                    val textStatus = showFields.firstOrNull { it.number == 2 }?.asMessage()
+                    val textStatus = (
+                        showFields.firstOrNull { it.number == 2 && it.wireType == 2 }
+                            ?: showFields.firstOrNull { it.number == 1 && it.wireType == 2 }
+                        )?.asMessage()
+                    isImeFieldActive = true
+                    lastImeAppPackage = currentForegroundPackage
                     if (textStatus != null) {
                         syncImeTextStatus(textStatus, isShowRequest = true)
                     } else {
                         imeCounter = 0
                         trackedTvText = ""
+                        trackedSelStart = 0
+                        trackedSelEnd = 0
                     }
                     onImeShowRequested(fieldCounter, trackedTvText)
+                }
+                30 -> { // remote_voice_begin (TV requests phone mic stream with session_id)
+                    val (sessionId, pkg) = parseVoiceBegin(field.asMessage())
+                    onVoiceBeginRequested(sessionId, pkg)
+                }
+                32 -> { // remote_voice_end (TV signals end of voice session)
+                    val sessionId = field.asMessage().firstOrNull { it.number == 1 }?.varint?.toInt() ?: 0
+                    onVoiceEndRequested(sessionId)
                 }
                 50 -> { // remote_set_volume_level (6=volume_max, 7=volume_level, 8=volume_muted)
                     val (level, max, muted) = parseVolumeLevel(field.asMessage())
@@ -194,45 +243,75 @@ class AndroidTvRemoteClient(
         }
     }
 
+    internal suspend fun applyIncomingFieldsForTest(fields: List<ProtobufWire.Field>) {
+        handleIncomingFields(fields)
+    }
+
+    private fun resetImeState() {
+        imeCounter = 0
+        fieldCounter = 0
+        trackedTvText = ""
+        trackedSelStart = 0
+        trackedSelEnd = 0
+        isImeFieldActive = false
+        lastImeAppPackage = null
+        currentForegroundPackage = null
+    }
+
     private fun syncIncomingImeBatchEdit(batchFields: List<ProtobufWire.Field>) {
-        batchFields.firstOrNull { it.number == 1 }?.varint?.toInt()?.let { tvImeCounter ->
-            imeCounter = tvImeCounter
-        }
-        batchFields.firstOrNull { it.number == 2 }?.varint?.toInt()?.let { tvFieldCounter ->
+        val tvFieldCounter = batchFields.firstOrNull { it.number == 2 }?.varint?.toInt()
+        val fieldChanged = tvFieldCounter != null && tvFieldCounter != fieldCounter
+        if (tvFieldCounter != null) {
             fieldCounter = tvFieldCounter
+            if (tvFieldCounter > 0) {
+                isImeFieldActive = true
+            }
+        }
+        val tvImeCounter = batchFields.firstOrNull { it.number == 1 }?.varint?.toInt()
+        if (fieldChanged) {
+            imeCounter = tvImeCounter ?: 0
+        } else if (tvImeCounter != null && tvImeCounter >= imeCounter) {
+            imeCounter = tvImeCounter
         }
         val edits = batchFields.filter { it.number == 3 }
         for (editField in edits) {
             val editMsg = editField.asMessage()
             val imeObj = editMsg.firstOrNull { it.number == 2 }?.asMessage() ?: continue
-            val value = imeObj.firstOrNull { it.number == 3 }?.asString() ?: continue
-            val start = imeObj.firstOrNull { it.number == 1 }?.varint?.toInt()
-            val end = imeObj.firstOrNull { it.number == 2 }?.varint?.toInt()
+            val value = imeObj.firstOrNull { it.number == 3 }?.asString() ?: ""
+            val start = imeObj.firstOrNull { it.number == 1 }?.varint?.toInt() ?: 0
+            val end = imeObj.firstOrNull { it.number == 2 }?.varint?.toInt() ?: start
             trackedTvText = applyTextEdit(trackedTvText, start, end, value)
+            val newCursor = (start.coerceIn(0, trackedTvText.length) + value.length).coerceIn(0, trackedTvText.length)
+            trackedSelStart = newCursor
+            trackedSelEnd = newCursor
         }
     }
 
     private fun syncImeTextStatus(textStatus: List<ProtobufWire.Field>, isShowRequest: Boolean) {
         val incomingFc = textStatus.firstOrNull { it.number == 1 }?.varint?.toInt()
         val incomingValue = textStatus.firstOrNull { it.number == 2 }?.asString()
-        val incomingInt5 = textStatus.firstOrNull { it.number == 5 }?.varint?.toInt()
+        val incomingStart = textStatus.firstOrNull { it.number == 3 }?.varint?.toInt()
+        val incomingEnd = textStatus.firstOrNull { it.number == 4 }?.varint?.toInt()
+        // NOTE: RemoteTextFieldStatus field 5 (int5) is TV EditorInfo attribute/inputType flags, NOT ime_counter!
 
         val fieldChanged = incomingFc != null && incomingFc != fieldCounter
         if (incomingFc != null) {
             fieldCounter = incomingFc
+            if (incomingFc > 0) {
+                isImeFieldActive = true
+            }
         }
 
+        // Proto3 omits default empty string "" and 0 indices on wire; RemoteTextFieldStatus is a full snapshot.
+        trackedTvText = incomingValue ?: ""
+        val safeLen = trackedTvText.length
+        val selStart = (incomingStart ?: if (trackedTvText.isEmpty()) 0 else safeLen).coerceIn(0, safeLen)
+        val selEnd = (incomingEnd ?: selStart).coerceIn(selStart, safeLen)
+        trackedSelStart = selStart
+        trackedSelEnd = selEnd
+
         if (isShowRequest || fieldChanged) {
-            // Fresh input field (or explicit show request): proto3 omits empty string / 0 counter on wire
-            trackedTvText = incomingValue ?: ""
-            imeCounter = incomingInt5 ?: 0
-        } else {
-            if (incomingValue != null) {
-                trackedTvText = incomingValue
-            }
-            if (incomingInt5 != null) {
-                imeCounter = incomingInt5
-            }
+            imeCounter = 0
         }
     }
 
@@ -261,6 +340,19 @@ class AndroidTvRemoteClient(
         sendRaw(payload)
     }
 
+    suspend fun sendVoiceBegin(sessionId: Int) {
+        sendRaw(buildVoiceBeginPayload(sessionId))
+    }
+
+    suspend fun sendVoicePayload(sessionId: Int, pcmSamples: ByteArray) {
+        if (pcmSamples.isEmpty()) return
+        sendRaw(buildVoicePayload(sessionId, pcmSamples))
+    }
+
+    suspend fun sendVoiceEnd(sessionId: Int) {
+        sendRaw(buildVoiceEndPayload(sessionId))
+    }
+
     /**
      * Sends UTF-8 text (Korean Hangul & English) to TV IME via serialized RemoteImeBatchEdit.
      * Matches Android TV Remote v2 wire format: RemoteEditInfo.insert = 0, [start, end) selection
@@ -271,8 +363,8 @@ class AndroidTvRemoteClient(
             val counter = imeCounter
             val fc = fieldCounter
             val currentLength = trackedTvText.length
-            val startPos = if (replaceExisting) 0 else currentLength
-            val endPos = currentLength
+            val startPos = if (replaceExisting) 0 else trackedSelStart.coerceIn(0, currentLength)
+            val endPos = if (replaceExisting) currentLength else trackedSelEnd.coerceIn(startPos, currentLength)
 
             val payload = buildImeBatchEditPayload(
                 imeCounter = counter,
@@ -284,7 +376,10 @@ class AndroidTvRemoteClient(
             )
             sendRaw(payload)
             imeCounter = counter + 1
-            trackedTvText = if (replaceExisting) text else trackedTvText + text
+            trackedTvText = applyTextEdit(trackedTvText, startPos, endPos, text)
+            val newCursor = (startPos + text.length).coerceIn(0, trackedTvText.length)
+            trackedSelStart = newCursor
+            trackedSelEnd = newCursor
 
             if (submitWithEnter) {
                 kotlinx.coroutines.delay(150)
@@ -303,6 +398,7 @@ class AndroidTvRemoteClient(
     fun disconnect(notify: Boolean = false) {
         val wasConnected = isConnected
         isConnected = false
+        resetImeState()
         readJob?.cancel()
         sessionScope?.cancel()
         readJob = null
@@ -319,13 +415,38 @@ class AndroidTvRemoteClient(
         const val DIRECTION_START_LONG = 1
         const val DIRECTION_END_LONG = 2
         const val DIRECTION_SHORT = 3
-        const val REMOTE_FEATURES = 623 // PING(1)|KEY(2)|IME(4)|POWER(8)|VOLUME(32)|64|APP_LINK(512)
+        const val REMOTE_FEATURES = 639 // PING(1)|KEY(2)|IME(4)|POWER(8)|VOICE(16)|VOLUME(32)|64|APP_LINK(512)
 
         fun parseVolumeLevel(volFields: List<ProtobufWire.Field>): Triple<Int, Int, Boolean> {
             val max = (volFields.firstOrNull { it.number == 6 }?.varint?.toInt() ?: 100).coerceAtLeast(1)
             val level = (volFields.firstOrNull { it.number == 7 }?.varint?.toInt() ?: 0).coerceIn(0, max)
             val muted = (volFields.firstOrNull { it.number == 8 }?.varint ?: 0L) != 0L
             return Triple(level, max, muted)
+        }
+
+        fun parseVoiceBegin(fields: List<ProtobufWire.Field>): Pair<Int, String?> {
+            val sessionId = fields.firstOrNull { it.number == 1 }?.varint?.toInt() ?: 0
+            val packageName = fields.firstOrNull { it.number == 2 }?.asString()
+            return sessionId to packageName
+        }
+
+        fun buildVoiceBeginPayload(sessionId: Int): ByteArray = ProtobufWire.encode {
+            writeMessageField(30) { // remote_voice_begin
+                writeVarintField(1, sessionId)
+            }
+        }
+
+        fun buildVoicePayload(sessionId: Int, pcmSamples: ByteArray): ByteArray = ProtobufWire.encode {
+            writeMessageField(31) { // remote_voice_payload
+                writeVarintField(1, sessionId)
+                writeBytesField(2, pcmSamples)
+            }
+        }
+
+        fun buildVoiceEndPayload(sessionId: Int): ByteArray = ProtobufWire.encode {
+            writeMessageField(32) { // remote_voice_end
+                writeVarintField(1, sessionId)
+            }
         }
 
         fun buildImeBatchEditPayload(

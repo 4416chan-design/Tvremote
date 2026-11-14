@@ -402,7 +402,7 @@ class NetworkAdbClient(
         return Result.success(Unit)
     }
 
-    private suspend fun hasAdbKeyboardIme(): Boolean {
+    suspend fun hasAdbKeyboardIme(): Boolean {
         adbKeyboardInstalled?.let { return it }
         val res = shell("ime list -s 2>/dev/null").getOrNull().orEmpty()
         val installed = res.contains("com.android.adbkeyboard/.AdbIME", ignoreCase = true)

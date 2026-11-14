@@ -21,16 +21,21 @@ import com.example.network.AndroidTvRemoteClient
 import com.example.network.ClientCertStore
 import com.example.network.NetworkAdbClient
 import com.example.network.TvDiscoveryManager
+import com.example.network.TvVoiceStreamer
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class SnackbarNotice(
     val message: String,
@@ -112,8 +117,22 @@ class RemoteViewModel(
     private var connectJob: Job? = null
     private var adbConnectJob: Job? = null
     private var brightnessSyncJob: Job? = null
+    private var voiceSessionJob: Job? = null
     private var lastPictureFallbackNoticeMs: Long = 0L
     private var lastAdbSentTextLength: Int = 0
+
+    private val voiceStreamer = TvVoiceStreamer()
+    private val voiceFallbackChannel = Channel<Unit>(Channel.BUFFERED)
+    val voiceFallbackRequests: Flow<Unit> = voiceFallbackChannel.receiveAsFlow()
+
+    @Volatile
+    private var voiceBeginDeferred: CompletableDeferred<Int>? = null
+
+    @Volatile
+    private var activeVoiceSessionId: Int? = null
+
+    @Volatile
+    private var voiceEndedByTv: Boolean = false
 
     private val pairingClient = AndroidTvPairingClient(certStore)
     private val remoteClient = AndroidTvRemoteClient(
@@ -138,6 +157,9 @@ class RemoteViewModel(
                 _isKeyboardSheetVisible.value = true
             }
         },
+        onImeHidden = {
+            _imePromptState.value = TvImePromptState()
+        },
         onVolumeChanged = { level, max, muted ->
             val safeMax = max.coerceAtLeast(1)
             val clampedLevel = level.coerceIn(0, safeMax)
@@ -159,14 +181,27 @@ class RemoteViewModel(
                 } else state
             }
         },
+        onVoiceBeginRequested = { sessionId, _ ->
+            activeVoiceSessionId = sessionId
+            voiceEndedByTv = false
+            voiceBeginDeferred?.complete(sessionId)
+        },
+        onVoiceEndRequested = { sessionId ->
+            if (activeVoiceSessionId == sessionId || activeVoiceSessionId != null) {
+                voiceEndedByTv = true
+                stopVoiceSession(sendEndPacket = false)
+            }
+        },
         onRemoteError = { _, detail ->
             if (!detail.isNullOrBlank()) {
                 showMessage(detail)
             }
         },
         onDisconnected = { cause ->
+            stopVoiceSession(sendEndPacket = false)
             adbConnectJob?.cancel()
             adbClient.disconnect()
+            _imePromptState.value = TvImePromptState()
             _connectionState.value = if (cause != null) {
                 TvConnectionState.Error(cause.message ?: "TV 연결이 끊어졌습니다.")
             } else {
@@ -233,6 +268,7 @@ class RemoteViewModel(
      * a half-open zombie socket that triggers a fresh 6-digit PIN handshake on return.
      */
     fun onAppBackgrounded() {
+        stopVoiceSession(sendEndPacket = true)
         val current = _connectionState.value
         if (current is TvConnectionState.PairingRequired) {
             return
@@ -242,6 +278,7 @@ class RemoteViewModel(
         if (current is TvConnectionState.Connected || current is TvConnectionState.Connecting) {
             adbClient.disconnect()
             remoteClient.disconnect(notify = false)
+            _imePromptState.value = TvImePromptState()
             _connectionState.value = TvConnectionState.Disconnected
         }
         lastAutoReconnectAttemptMs = 0L
@@ -587,7 +624,7 @@ class RemoteViewModel(
         if (!ensureConnectedOrPrompt()) return
         val connectedHost = (_connectionState.value as? TvConnectionState.Connected)?.host
         viewModelScope.launch {
-            sendTextViaAdbOrFallback(
+            sendTextViaStandardImeOrAdb(
                 host = connectedHost,
                 text = text,
                 replaceExisting = replaceExisting,
@@ -597,13 +634,39 @@ class RemoteViewModel(
         }
     }
 
-    private suspend fun sendTextViaAdbOrFallback(
+    /**
+     * Standard Android TV Remote v2 keyboard transmission:
+     * 1) When the TV has an active IME input field (RemoteImeShowRequest / RemoteImeKeyInject),
+     *    send all UTF-8 text (Korean Hangul, English, symbols) via RemoteImeBatchEdit + ENTER.
+     * 2) When the TV app uses a custom keyboard without native Android IME focus (e.g. YouTube UI),
+     *    fall back to ADB `input text` (ASCII) or ADBKeyboard broadcast (if installed).
+     */
+    private suspend fun sendTextViaStandardImeOrAdb(
         host: String?,
         text: String,
         replaceExisting: Boolean,
         submitWithEnter: Boolean,
         showSuccessMessage: Boolean
     ) {
+        val imeActive = remoteClient.isImeFieldActive || _imePromptState.value.isTvImeVisible
+        if (remoteClient.isConnected && imeActive) {
+            val imeResult = runCatching {
+                remoteClient.sendText(
+                    text = text,
+                    replaceExisting = replaceExisting,
+                    submitWithEnter = submitWithEnter
+                )
+            }
+            if (imeResult.isSuccess) {
+                lastAdbSentTextLength = 0
+                if (showSuccessMessage) {
+                    showMessage("TV로 입력을 전송했습니다.")
+                }
+                return
+            }
+        }
+
+        // TV IME is not currently active: try ADB (ASCII input text or ADBKeyboard Base64 Hangul)
         if (!adbClient.isConnected && !host.isNullOrBlank()) {
             adbClient.connect(host, NetworkAdbClient.DEFAULT_ADB_PORT)
         }
@@ -615,67 +678,148 @@ class RemoteViewModel(
                 else -> 0
             }
 
-            var adbResult = adbClient.sendInputText(
-                text = text,
-                clearCount = clearCount,
-                submitWithEnter = submitWithEnter
-            )
-            if (adbResult.isFailure && !adbClient.isConnected && !host.isNullOrBlank()) {
-                if (adbClient.connect(host, NetworkAdbClient.DEFAULT_ADB_PORT)) {
-                    adbResult = adbClient.sendInputText(
-                        text = text,
-                        clearCount = clearCount,
-                        submitWithEnter = submitWithEnter
-                    )
-                }
-            }
-
-            if (adbResult.isSuccess) {
-                lastAdbSentTextLength = if (submitWithEnter || text.isEmpty()) 0 else text.length
-                if (showSuccessMessage) {
-                    showMessage("ADB로 입력을 전송했습니다.")
-                }
-                return
-            }
-
-            // Pure `adb shell input text` is ASCII-only; when Unicode/Hangul lacks ADBKeyboard APK,
-            // send UTF-8 text via IME batch edit + commit ENTER via ADB input keyevent 66
-            if (adbResult.exceptionOrNull()?.message == NetworkAdbClient.ADB_UNICODE_UNSUPPORTED) {
-                val imeResult = runCatching {
-                    remoteClient.sendText(text, replaceExisting = replaceExisting, submitWithEnter = false)
-                    if (submitWithEnter) {
-                        delay(150)
-                        val enterRes = adbClient.sendKeyEvent(TvKeyCodes.ENTER)
-                        if (enterRes.isFailure) {
-                            remoteClient.sendKey(TvKeyCodes.ENTER, AndroidTvRemoteClient.DIRECTION_SHORT)
-                        }
+            if (text.isEmpty() || NetworkAdbClient.isAsciiInputSupported(text) || adbClient.hasAdbKeyboardIme()) {
+                var adbResult = adbClient.sendInputText(
+                    text = text,
+                    clearCount = clearCount,
+                    submitWithEnter = submitWithEnter
+                )
+                if (adbResult.isFailure && !adbClient.isConnected && !host.isNullOrBlank()) {
+                    if (adbClient.connect(host, NetworkAdbClient.DEFAULT_ADB_PORT)) {
+                        adbResult = adbClient.sendInputText(
+                            text = text,
+                            clearCount = clearCount,
+                            submitWithEnter = submitWithEnter
+                        )
                     }
                 }
-                if (imeResult.isSuccess) {
-                    lastAdbSentTextLength = if (submitWithEnter) 0 else text.length
+                if (adbResult.isSuccess) {
+                    lastAdbSentTextLength = if (submitWithEnter || text.isEmpty()) 0 else text.length
                     if (showSuccessMessage) {
-                        showMessage("TV로 한글 입력을 전송했습니다.")
+                        showMessage("ADB로 입력을 전송했습니다.")
                     }
-                } else {
-                    showMessage("한글 전송 실패: ${imeResult.exceptionOrNull()?.message}")
+                    return
                 }
-                return
             }
         }
 
-        runCatching {
-            remoteClient.sendText(text, replaceExisting = replaceExisting, submitWithEnter = submitWithEnter)
-            lastAdbSentTextLength = if (submitWithEnter || text.isEmpty()) 0 else text.length
-            if (showSuccessMessage) {
+        // Last-resort attempt via RemoteImeBatchEdit even if TV didn't emit RemoteImeShowRequest
+        val fallbackResult = runCatching {
+            remoteClient.sendText(
+                text = text,
+                replaceExisting = replaceExisting,
+                submitWithEnter = submitWithEnter
+            )
+        }
+        if (fallbackResult.isSuccess) {
+            if (!imeActive && !NetworkAdbClient.isAsciiInputSupported(text) && text.isNotEmpty()) {
+                showMessage("TV 검색창(키보드)이 열려 있는지 확인해 주세요. (자체 키보드 앱은 영문 ADB 입력 지원)")
+            } else if (showSuccessMessage) {
                 showMessage("TV로 입력을 전송했습니다.")
             }
-        }.onFailure {
-            showMessage("텍스트 전송 실패: ${it.message}")
+        } else {
+            showMessage("텍스트 전송 실패: ${fallbackResult.exceptionOrNull()?.message}")
         }
     }
 
     fun setVoiceListening(listening: Boolean) {
         _isVoiceListening.value = listening
+    }
+
+    /**
+     * Initiates Android TV Remote v2 PCM voice streaming:
+     * 1) Pre-captures 8 kHz 16-bit mono PCM immediately so opening words aren't lost
+     * 2) Sends KEYCODE_VOICE_ASSIST (then KEYCODE_SEARCH fallback if needed)
+     * 3) Upon TV's RemoteVoiceBegin(sessionId), echoes RemoteVoiceBegin and streams RemoteVoicePayload
+     * 4) Falls back to phone SpeechRecognizer -> ADB text if TV firmware does not open RemoteVoiceBegin
+     */
+    fun startVoiceSession() {
+        if (!ensureConnectedOrPrompt()) return
+        if (_isVoiceListening.value) {
+            stopVoiceSession(sendEndPacket = true)
+            return
+        }
+
+        voiceSessionJob?.cancel()
+        voiceStreamer.stop()
+        activeVoiceSessionId = null
+        voiceEndedByTv = false
+        val beginSignal = CompletableDeferred<Int>()
+        voiceBeginDeferred = beginSignal
+        _isVoiceListening.value = true
+
+        voiceSessionJob = viewModelScope.launch {
+            try {
+                voiceStreamer.startCapture(
+                    scope = this,
+                    onChunk = { sid, chunk ->
+                        if (remoteClient.isConnected) {
+                            runCatching { remoteClient.sendVoicePayload(sid, chunk) }
+                        }
+                    },
+                    onCaptureFailed = { err ->
+                        showMessage("마이크 시작 실패: ${err.message ?: "권한 또는 오디오 장치 오류"}")
+                        stopVoiceSession(sendEndPacket = false)
+                    }
+                )
+
+                // Trigger TV search/voice assistant and wait for RemoteVoiceBegin(30)
+                runCatching {
+                    remoteClient.sendKey(TvKeyCodes.SEARCH, AndroidTvRemoteClient.DIRECTION_SHORT)
+                }
+
+                var sessionId = withTimeoutOrNull(1_150L) { beginSignal.await() }
+                if (sessionId == null && remoteClient.isConnected && _isVoiceListening.value) {
+                    runCatching {
+                        remoteClient.sendKey(TvKeyCodes.VOICE_ASSIST, AndroidTvRemoteClient.DIRECTION_SHORT)
+                    }
+                    sessionId = withTimeoutOrNull(1_150L) { beginSignal.await() }
+                }
+
+                if (sessionId == null) {
+                    // TV did not open a Protocol v2 RemoteVoiceBegin stream; release mic & fall back to SpeechRecognizer
+                    voiceBeginDeferred = null
+                    voiceStreamer.stop()
+                    _isVoiceListening.value = false
+                    if (remoteClient.isConnected) {
+                        voiceFallbackChannel.trySend(Unit)
+                    }
+                    return@launch
+                }
+
+                activeVoiceSessionId = sessionId
+                remoteClient.sendVoiceBegin(sessionId)
+                voiceStreamer.activateSession(sessionId)
+                showMessage("TV로 음성을 전송 중입니다. 말씀하신 뒤 마이크를 다시 누르세요.")
+
+                // Auto-stop after 10 seconds if TV VAD hasn't ended the stream yet
+                delay(10_000L)
+                stopVoiceSession(sendEndPacket = true)
+            } catch (_: kotlinx.coroutines.CancellationException) {
+                // Handled by stopVoiceSession
+            } catch (t: Throwable) {
+                showMessage("음성 전송 오류: ${t.message}")
+                stopVoiceSession(sendEndPacket = true)
+            }
+        }
+    }
+
+    fun stopVoiceSession(sendEndPacket: Boolean = true) {
+        val sid = activeVoiceSessionId
+        val shouldSendEnd = sendEndPacket && sid != null && !voiceEndedByTv && remoteClient.isConnected
+        activeVoiceSessionId = null
+        voiceBeginDeferred?.cancel()
+        voiceBeginDeferred = null
+        voiceSessionJob?.cancel()
+        voiceSessionJob = null
+        voiceStreamer.stop()
+        _isVoiceListening.value = false
+
+        if (shouldSendEnd) {
+            viewModelScope.launch {
+                runCatching { remoteClient.sendVoiceEnd(sid!!) }
+            }
+        }
     }
 
     fun onVoiceSearchRecognized(spokenText: String) {
@@ -687,7 +831,7 @@ class RemoteViewModel(
             runCatching {
                 remoteClient.sendKey(TvKeyCodes.SEARCH, AndroidTvRemoteClient.DIRECTION_SHORT)
                 delay(350)
-                sendTextViaAdbOrFallback(
+                sendTextViaStandardImeOrAdb(
                     host = connectedHost,
                     text = spokenText,
                     replaceExisting = true,
@@ -699,12 +843,6 @@ class RemoteViewModel(
                 showMessage("음성 검색 전송 실패: ${it.message}")
             }
         }
-    }
-
-    fun onVoiceSearchFallbackKey() {
-        _isVoiceListening.value = false
-        if (!ensureConnectedOrPrompt()) return
-        sendKey(TvKeyCodes.VOICE_ASSIST)
     }
 
     fun toggleFavorite(app: TvAppCatalogItem, isCurrentlyFavorite: Boolean) {
@@ -895,6 +1033,7 @@ class RemoteViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        stopVoiceSession(sendEndPacket = true)
         connectJob?.cancel()
         adbConnectJob?.cancel()
         brightnessSyncJob?.cancel()

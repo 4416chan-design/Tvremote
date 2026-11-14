@@ -228,4 +228,87 @@ class ProtobufAndCertUnitTest {
         )
         assertEquals("input keyevent 123 67 67 2>&1", clearOnly)
     }
+
+    @Test
+    fun `remote voice protocol encodes begin payload end and negotiates VOICE feature flag`() {
+        assertTrue((com.example.network.AndroidTvRemoteClient.REMOTE_FEATURES and 16) != 0)
+        assertEquals(639, com.example.network.AndroidTvRemoteClient.REMOTE_FEATURES)
+
+        val beginIncoming = ProtobufWire.encode {
+            writeMessageField(30) {
+                writeVarintField(1, 7)
+                writeStringField(2, "com.google.android.katniss")
+            }
+        }
+        val beginMsg = ProtobufWire.parseFields(beginIncoming).first { it.number == 30 }.asMessage()
+        val (sid, pkg) = com.example.network.AndroidTvRemoteClient.parseVoiceBegin(beginMsg)
+        assertEquals(7, sid)
+        assertEquals("com.google.android.katniss", pkg)
+
+        val beginReply = ProtobufWire.parseFields(
+            com.example.network.AndroidTvRemoteClient.buildVoiceBeginPayload(7)
+        ).first { it.number == 30 }.asMessage()
+        assertEquals(7L, beginReply.first { it.number == 1 }.varint)
+
+        val pcmSample = byteArrayOf(0x11, 0x22, 0x33, 0x44)
+        val payloadMsg = ProtobufWire.parseFields(
+            com.example.network.AndroidTvRemoteClient.buildVoicePayload(7, pcmSample)
+        ).first { it.number == 31 }.asMessage()
+        assertEquals(7L, payloadMsg.first { it.number == 1 }.varint)
+        assertTrue(pcmSample.contentEquals(payloadMsg.first { it.number == 2 }.bytes))
+
+        val endMsg = ProtobufWire.parseFields(
+            com.example.network.AndroidTvRemoteClient.buildVoiceEndPayload(7)
+        ).first { it.number == 32 }.asMessage()
+        assertEquals(7L, endMsg.first { it.number == 1 }.varint)
+    }
+
+    @Test
+    fun `ime sync ignores int5 attribute flags and resets tracked text on proto3 empty snapshot`() {
+        var imeShowCalls = 0
+        val client = com.example.network.AndroidTvRemoteClient(
+            certStore = null,
+            onForegroundAppChanged = {},
+            onImeShowRequested = { _, _ -> imeShowCalls++ },
+            onVolumeChanged = { _, _, _ -> },
+            onDisconnected = {}
+        )
+
+        // TV sends RemoteImeShowRequest(22) with counter_field=3, value="기존", int5=524289 (EditorInfo flags)
+        val showBytes = ProtobufWire.encode {
+            writeMessageField(22) {
+                writeMessageField(2) {
+                    writeVarintField(1, 3)
+                    writeStringField(2, "기존")
+                    writeVarintField(3, 2)
+                    writeVarintField(4, 2)
+                    writeVarintField(5, 524289)
+                }
+            }
+        }
+        kotlinx.coroutines.runBlocking {
+            client.applyIncomingFieldsForTest(ProtobufWire.parseFields(showBytes))
+        }
+        assertEquals(1, imeShowCalls)
+        assertTrue(client.isImeFieldActive)
+        assertEquals(3, client.debugFieldCounter)
+        assertEquals("기존", client.debugTrackedText)
+        // CRITICAL: int5 (524289) must NOT overwrite imeCounter; new field starts at imeCounter = 0
+        assertEquals(0, client.debugImeCounter)
+
+        // TV sends RemoteImeKeyInject(20) on same field with empty value omitted in proto3 + int5=524289
+        val clearedBytes = ProtobufWire.encode {
+            writeMessageField(20) {
+                writeMessageField(2) {
+                    writeVarintField(1, 3)
+                    writeVarintField(5, 524289)
+                }
+            }
+        }
+        kotlinx.coroutines.runBlocking {
+            client.applyIncomingFieldsForTest(ProtobufWire.parseFields(clearedBytes))
+        }
+        assertEquals("", client.debugTrackedText)
+        assertEquals(0, client.debugImeCounter)
+    }
 }
