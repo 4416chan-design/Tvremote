@@ -73,6 +73,7 @@ fun KeyboardInputSheet(
     tvName: String,
     initialText: String,
     isTvImeVisible: Boolean = false,
+    isAdbConnected: Boolean = false,
     onSendText: (text: String, replaceExisting: Boolean, submitWithEnter: Boolean) -> Unit,
     onSendKey: (Int) -> Unit,
     onDismiss: () -> Unit
@@ -138,10 +139,16 @@ fun KeyboardInputSheet(
                         style = MaterialTheme.typography.titleLarge,
                         color = TextPrimary
                     )
+                    val statusText = when {
+                        isAdbConnected && isTvImeVisible -> "ADB + TV 입력창 연결됨"
+                        isAdbConnected -> "ADB 연결됨 (영문/숫자/Enter 직접 전송)"
+                        isTvImeVisible -> "TV 입력창 연결됨"
+                        else -> "TV에서 검색창을 먼저 선택하세요"
+                    }
                     Text(
-                        text = if (isTvImeVisible) "TV 입력창 연결됨" else "TV에서 검색창을 먼저 선택하세요",
+                        text = statusText,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (isTvImeVisible) MintGreen else TextSecondary
+                        color = if (isAdbConnected || isTvImeVisible) MintGreen else TextSecondary
                     )
                 }
 

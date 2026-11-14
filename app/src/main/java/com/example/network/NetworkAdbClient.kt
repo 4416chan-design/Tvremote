@@ -1,5 +1,6 @@
 package com.example.network
 
+import android.util.Base64
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -73,6 +74,9 @@ class NetworkAdbClient(
     @Volatile
     private var lastVerifiedHardwareBacklightSupport: Boolean? = null
 
+    @Volatile
+    private var adbKeyboardInstalled: Boolean? = null
+
     val isConnected: Boolean
         get() = _adbState.value == AdbConnectionState.CONNECTED && socket?.isConnected == true && socket?.isClosed == false
 
@@ -83,6 +87,7 @@ class NetworkAdbClient(
             }
             closeSocketOnly()
             lastVerifiedHardwareBacklightSupport = null
+            adbKeyboardInstalled = null
             _adbState.value = AdbConnectionState.CONNECTING
             _adbStatusDetail.value = "TV ADB(5555) 연결 시도 중..."
 
@@ -315,6 +320,97 @@ class NetworkAdbClient(
     }
 
     /**
+     * Sends text via ADB shell:
+     * - For ASCII text: uses `input text` (with proper `%s` space and POSIX shell escaping)
+     * - For Unicode/Korean text: uses ADBKeyboard Base64 broadcast if installed on the TV,
+     *   otherwise returns failure with [ADB_UNICODE_UNSUPPORTED] so caller can bridge UTF-8 IME + ADB Enter.
+     */
+    suspend fun sendInputText(
+        text: String,
+        clearCount: Int = 0,
+        submitWithEnter: Boolean = false
+    ): Result<Unit> {
+        if (!isConnected) {
+            return Result.failure(IllegalStateException("ADB 미연결"))
+        }
+
+        if (text.isEmpty()) {
+            return clearTextField(count = clearCount.coerceAtLeast(1), submitWithEnter = submitWithEnter)
+        }
+
+        if (isAsciiInputSupported(text)) {
+            val cmd = buildInputTextShellCommand(
+                text = text,
+                clearCount = clearCount,
+                submitWithEnter = submitWithEnter
+            ) ?: return Result.failure(IllegalArgumentException("지원되지 않는 제어 문자입니다."))
+
+            val res = shell(cmd)
+            if (res.isFailure) {
+                return Result.failure(res.exceptionOrNull() ?: IllegalStateException("ADB 텍스트 전송 실패"))
+            }
+            val out = res.getOrDefault("")
+            if (out.contains("Error:", ignoreCase = true) || out.contains("Exception", ignoreCase = true)) {
+                return Result.failure(IllegalStateException(out))
+            }
+            return Result.success(Unit)
+        }
+
+        // Non-ASCII (e.g. Korean Hangul): check if ADBKeyboard is installed on TV
+        if (hasAdbKeyboardIme()) {
+            val b64 = Base64.encodeToString(text.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+            val clearPrefix = buildClearKeyEventsPrefix(clearCount)
+            val enterSuffix = if (submitWithEnter) "; input keyevent 66 2>&1" else ""
+            val cmd = buildString {
+                if (clearPrefix.isNotEmpty()) {
+                    append(clearPrefix)
+                    append("; ")
+                }
+                append("PREV_IME=\$(settings get secure default_input_method 2>/dev/null); ")
+                append("ime enable com.android.adbkeyboard/.AdbIME >/dev/null 2>&1; ")
+                append("ime set com.android.adbkeyboard/.AdbIME >/dev/null 2>&1; ")
+                append("am broadcast -a ADB_INPUT_B64 --es msg '$b64' >/dev/null 2>&1; ")
+                append("if [ -n \"\$PREV_IME\" ] && [ \"\$PREV_IME\" != \"null\" ]; then ime set \"\$PREV_IME\" >/dev/null 2>&1; fi")
+                append(enterSuffix)
+            }
+            val res = shell(cmd)
+            if (res.isSuccess) return Result.success(Unit)
+            return Result.failure(res.exceptionOrNull() ?: IllegalStateException("ADBKeyboard 전송 실패"))
+        }
+
+        return Result.failure(UnsupportedOperationException(ADB_UNICODE_UNSUPPORTED))
+    }
+
+    suspend fun clearTextField(count: Int = 20, submitWithEnter: Boolean = false): Result<Unit> {
+        if (!isConnected) {
+            return Result.failure(IllegalStateException("ADB 미연결"))
+        }
+        val prefix = buildClearKeyEventsPrefix(count.coerceIn(1, 30))
+        val cmd = if (submitWithEnter) {
+            "$prefix; input keyevent 66 2>&1"
+        } else {
+            "$prefix 2>&1"
+        }
+        val res = shell(cmd)
+        if (res.isFailure) {
+            return Result.failure(res.exceptionOrNull() ?: IllegalStateException("ADB 삭제 명령 실패"))
+        }
+        val out = res.getOrDefault("")
+        if (out.contains("Error:", ignoreCase = true) || out.contains("Exception", ignoreCase = true)) {
+            return Result.failure(IllegalStateException(out))
+        }
+        return Result.success(Unit)
+    }
+
+    private suspend fun hasAdbKeyboardIme(): Boolean {
+        adbKeyboardInstalled?.let { return it }
+        val res = shell("ime list -s 2>/dev/null").getOrNull().orEmpty()
+        val installed = res.contains("com.android.adbkeyboard/.AdbIME", ignoreCase = true)
+        adbKeyboardInstalled = installed
+        return installed
+    }
+
+    /**
      * Launches a TV app directly via ADB shell without touching port 6466 sendAppLink,
      * preventing Xiaomi TV A Pro Remote Service disconnections.
      * Falls back to opening the Play Store detail page via ADB if the package is not installed.
@@ -354,6 +450,7 @@ class NetworkAdbClient(
     fun disconnect() {
         connectedHost = null
         lastVerifiedHardwareBacklightSupport = null
+        adbKeyboardInstalled = null
         closeSocketOnly()
         _adbState.value = AdbConnectionState.DISCONNECTED
         _adbStatusDetail.value = null
@@ -452,6 +549,64 @@ class NetworkAdbClient(
                 return null
             }
             return trimmed
+        }
+
+        const val ADB_UNICODE_UNSUPPORTED = "ADB_UNICODE_UNSUPPORTED"
+
+        fun isAsciiInputSupported(text: String): Boolean {
+            return text.all { ch -> ch.code in 0x20..0x7E }
+        }
+
+        fun buildClearKeyEventsPrefix(clearCount: Int): String {
+            val safeCount = clearCount.coerceIn(0, 30)
+            if (safeCount <= 0) return ""
+            val dels = List(safeCount) { "67" }.joinToString(" ")
+            return "input keyevent 123 $dels"
+        }
+
+        fun buildInputTextShellCommand(
+            text: String,
+            clearCount: Int = 0,
+            submitWithEnter: Boolean = false
+        ): String? {
+            if (!isAsciiInputSupported(text)) return null
+            val clearPrefix = buildClearKeyEventsPrefix(clearCount)
+            val enterSuffix = if (submitWithEnter) "; input keyevent 66 2>&1" else ""
+
+            if (text.isEmpty()) {
+                return buildString {
+                    if (clearPrefix.isNotEmpty()) {
+                        append(clearPrefix)
+                        append(" 2>&1")
+                    }
+                    if (enterSuffix.isNotEmpty()) {
+                        if (isNotEmpty()) append(enterSuffix)
+                        else append("input keyevent 66 2>&1")
+                    }
+                }.ifBlank { null }
+            }
+
+            // Android `input text` treats `%s` as space; single-quoting disables all sh meta-chars
+            val encodedForInput = buildString {
+                for (ch in text) {
+                    when (ch) {
+                        ' ' -> append("%s")
+                        '\'' -> append("'\\''")
+                        else -> append(ch)
+                    }
+                }
+            }
+
+            return buildString {
+                if (clearPrefix.isNotEmpty()) {
+                    append(clearPrefix)
+                    append("; ")
+                }
+                append("input text '")
+                append(encodedForInput)
+                append("' 2>&1")
+                append(enterSuffix)
+            }
         }
 
         fun buildKeyEventShellCommand(keyCode: Int): String? {

@@ -109,9 +109,11 @@ class RemoteViewModel(
     private var volumeSettleJob: Job? = null
     private val volumeStepQueue = Channel<Int>(Channel.UNLIMITED)
 
+    private var connectJob: Job? = null
     private var adbConnectJob: Job? = null
     private var brightnessSyncJob: Job? = null
     private var lastPictureFallbackNoticeMs: Long = 0L
+    private var lastAdbSentTextLength: Int = 0
 
     private val pairingClient = AndroidTvPairingClient(certStore)
     private val remoteClient = AndroidTvRemoteClient(
@@ -193,6 +195,9 @@ class RemoteViewModel(
         }
         viewModelScope.launch {
             repository.ensureDefaultsInitialized()
+            if (connectJob?.isActive == true || _connectionState.value !is TvConnectionState.Disconnected) {
+                return@launch
+            }
             lastAutoReconnectAttemptMs = System.currentTimeMillis()
             val lastTv = repository.getMostRecentTv()
             if (lastTv != null) {
@@ -223,6 +228,25 @@ class RemoteViewModel(
         startAdbAutoConnect(connectedHost)
     }
 
+    /**
+     * Cleanly closes sockets with TCP FIN when leaving the app so the TV does not retain
+     * a half-open zombie socket that triggers a fresh 6-digit PIN handshake on return.
+     */
+    fun onAppBackgrounded() {
+        val current = _connectionState.value
+        if (current is TvConnectionState.PairingRequired) {
+            return
+        }
+        connectJob?.cancel()
+        adbConnectJob?.cancel()
+        if (current is TvConnectionState.Connected || current is TvConnectionState.Connecting) {
+            adbClient.disconnect()
+            remoteClient.disconnect(notify = false)
+            _connectionState.value = TvConnectionState.Disconnected
+        }
+        lastAutoReconnectAttemptMs = 0L
+    }
+
     fun autoReconnectIfNeeded() {
         val current = _connectionState.value
         if (current is TvConnectionState.Connected ||
@@ -232,11 +256,12 @@ class RemoteViewModel(
             return
         }
         val now = System.currentTimeMillis()
-        if (now - lastAutoReconnectAttemptMs < 3000L) return
+        if (now - lastAutoReconnectAttemptMs < 1_500L) return
         lastAutoReconnectAttemptMs = now
 
         viewModelScope.launch {
             val lastTv = repository.getMostRecentTv() ?: return@launch
+            if (connectJob?.isActive == true) return@launch
             connectToTv(
                 host = lastTv.host,
                 tvName = lastTv.name,
@@ -275,10 +300,20 @@ class RemoteViewModel(
         }
         val label = tvName.ifBlank { cleanHost }
 
-        viewModelScope.launch {
+        connectJob?.cancel()
+        connectJob = viewModelScope.launch {
             _connectionState.value = TvConnectionState.Connecting(label, cleanHost)
-            val remoteConnectResult = runCatching {
+            val alreadyPaired = repository.isHostPaired(cleanHost)
+
+            // Retry once on 6466 in case TV is still releasing a previous socket after wake/background
+            var remoteConnectResult = runCatching {
                 remoteClient.connect(cleanHost, remotePort)
+            }
+            if (remoteConnectResult.isFailure && alreadyPaired) {
+                delay(450)
+                remoteConnectResult = runCatching {
+                    remoteClient.connect(cleanHost, remotePort)
+                }
             }
 
             if (remoteConnectResult.isSuccess) {
@@ -294,7 +329,24 @@ class RemoteViewModel(
                 return@launch
             }
 
-            // Remote connection failed (likely untrusted cert or offline): attempt pairing handshake on 6467
+            val remoteFailure = remoteConnectResult.exceptionOrNull()
+            // Never ambush the user with a 6-digit PIN dialog during automatic background/resume reconnect
+            if (silentIfOffline) {
+                _connectionState.value = TvConnectionState.Disconnected
+                return@launch
+            }
+
+            // If this TV was already paired and failed due to network/timeout (TV off or Wi-Fi glitch),
+            // report the connection error instead of resetting into 6467 PIN pairing.
+            if (alreadyPaired && !isCertificateRejectionError(remoteFailure)) {
+                val errMsg = remoteFailure?.message
+                    ?: "TV에 연결할 수 없습니다. TV 전원 및 같은 Wi-Fi를 확인해 주세요."
+                _connectionState.value = TvConnectionState.Error(errMsg, cleanHost)
+                showMessage(errMsg)
+                return@launch
+            }
+
+            // First-time TV or explicit untrusted-certificate rejection: start pairing on port 6467
             val pairingStartResult = runCatching {
                 pairingClient.startPairing(cleanHost, pairingPort, "TV 리모컨")
             }
@@ -310,16 +362,22 @@ class RemoteViewModel(
                 )
             } else {
                 val errMsg = pairingStartResult.exceptionOrNull()?.message
-                    ?: remoteConnectResult.exceptionOrNull()?.message
+                    ?: remoteFailure?.message
                     ?: "TV에 연결할 수 없습니다. 같은 Wi-Fi 및 TV 전원을 확인해 주세요."
-                if (silentIfOffline) {
-                    _connectionState.value = TvConnectionState.Disconnected
-                } else {
-                    _connectionState.value = TvConnectionState.Error(errMsg, cleanHost)
-                    showMessage(errMsg)
-                }
+                _connectionState.value = TvConnectionState.Error(errMsg, cleanHost)
+                showMessage(errMsg)
             }
         }
+    }
+
+    private fun isCertificateRejectionError(error: Throwable?): Boolean {
+        if (error == null) return false
+        val msg = error.message.orEmpty()
+        return error is javax.net.ssl.SSLHandshakeException ||
+            error is javax.net.ssl.SSLException ||
+            msg.contains("페어링 인증", ignoreCase = true) ||
+            msg.contains("certificate", ignoreCase = true) ||
+            msg.contains("bad_certificate", ignoreCase = true)
     }
 
     fun submitPairingPin(pin: String) {
@@ -527,15 +585,92 @@ class RemoteViewModel(
 
     fun sendKeyboardText(text: String, replaceExisting: Boolean, submitWithEnter: Boolean) {
         if (!ensureConnectedOrPrompt()) return
+        val connectedHost = (_connectionState.value as? TvConnectionState.Connected)?.host
         viewModelScope.launch {
-            runCatching {
-                remoteClient.sendText(text, replaceExisting = replaceExisting, submitWithEnter = submitWithEnter)
-                if (submitWithEnter) {
-                    showMessage("TV로 입력을 전송했습니다.")
-                }
-            }.onFailure {
-                showMessage("텍스트 전송 실패: ${it.message}")
+            sendTextViaAdbOrFallback(
+                host = connectedHost,
+                text = text,
+                replaceExisting = replaceExisting,
+                submitWithEnter = submitWithEnter,
+                showSuccessMessage = submitWithEnter
+            )
+        }
+    }
+
+    private suspend fun sendTextViaAdbOrFallback(
+        host: String?,
+        text: String,
+        replaceExisting: Boolean,
+        submitWithEnter: Boolean,
+        showSuccessMessage: Boolean
+    ) {
+        if (!adbClient.isConnected && !host.isNullOrBlank()) {
+            adbClient.connect(host, NetworkAdbClient.DEFAULT_ADB_PORT)
+        }
+
+        if (adbClient.isConnected) {
+            val clearCount = when {
+                text.isEmpty() -> maxOf(lastAdbSentTextLength + 4, 20)
+                replaceExisting && lastAdbSentTextLength > 0 -> (lastAdbSentTextLength + 2).coerceAtMost(30)
+                else -> 0
             }
+
+            var adbResult = adbClient.sendInputText(
+                text = text,
+                clearCount = clearCount,
+                submitWithEnter = submitWithEnter
+            )
+            if (adbResult.isFailure && !adbClient.isConnected && !host.isNullOrBlank()) {
+                if (adbClient.connect(host, NetworkAdbClient.DEFAULT_ADB_PORT)) {
+                    adbResult = adbClient.sendInputText(
+                        text = text,
+                        clearCount = clearCount,
+                        submitWithEnter = submitWithEnter
+                    )
+                }
+            }
+
+            if (adbResult.isSuccess) {
+                lastAdbSentTextLength = if (submitWithEnter || text.isEmpty()) 0 else text.length
+                if (showSuccessMessage) {
+                    showMessage("ADB로 입력을 전송했습니다.")
+                }
+                return
+            }
+
+            // Pure `adb shell input text` is ASCII-only; when Unicode/Hangul lacks ADBKeyboard APK,
+            // send UTF-8 text via IME batch edit + commit ENTER via ADB input keyevent 66
+            if (adbResult.exceptionOrNull()?.message == NetworkAdbClient.ADB_UNICODE_UNSUPPORTED) {
+                val imeResult = runCatching {
+                    remoteClient.sendText(text, replaceExisting = replaceExisting, submitWithEnter = false)
+                    if (submitWithEnter) {
+                        delay(150)
+                        val enterRes = adbClient.sendKeyEvent(TvKeyCodes.ENTER)
+                        if (enterRes.isFailure) {
+                            remoteClient.sendKey(TvKeyCodes.ENTER, AndroidTvRemoteClient.DIRECTION_SHORT)
+                        }
+                    }
+                }
+                if (imeResult.isSuccess) {
+                    lastAdbSentTextLength = if (submitWithEnter) 0 else text.length
+                    if (showSuccessMessage) {
+                        showMessage("TV로 한글 입력을 전송했습니다.")
+                    }
+                } else {
+                    showMessage("한글 전송 실패: ${imeResult.exceptionOrNull()?.message}")
+                }
+                return
+            }
+        }
+
+        runCatching {
+            remoteClient.sendText(text, replaceExisting = replaceExisting, submitWithEnter = submitWithEnter)
+            lastAdbSentTextLength = if (submitWithEnter || text.isEmpty()) 0 else text.length
+            if (showSuccessMessage) {
+                showMessage("TV로 입력을 전송했습니다.")
+            }
+        }.onFailure {
+            showMessage("텍스트 전송 실패: ${it.message}")
         }
     }
 
@@ -547,11 +682,18 @@ class RemoteViewModel(
         _isVoiceListening.value = false
         if (spokenText.isBlank()) return
         if (!ensureConnectedOrPrompt()) return
+        val connectedHost = (_connectionState.value as? TvConnectionState.Connected)?.host
         viewModelScope.launch {
             runCatching {
                 remoteClient.sendKey(TvKeyCodes.SEARCH, AndroidTvRemoteClient.DIRECTION_SHORT)
                 delay(350)
-                remoteClient.sendText(spokenText, replaceExisting = true, submitWithEnter = true)
+                sendTextViaAdbOrFallback(
+                    host = connectedHost,
+                    text = spokenText,
+                    replaceExisting = true,
+                    submitWithEnter = true,
+                    showSuccessMessage = false
+                )
                 showMessage("\"$spokenText\" 음성 검색 전송")
             }.onFailure {
                 showMessage("음성 검색 전송 실패: ${it.message}")
@@ -753,6 +895,7 @@ class RemoteViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        connectJob?.cancel()
         adbConnectJob?.cancel()
         brightnessSyncJob?.cancel()
         adbClient.disconnect()

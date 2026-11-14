@@ -69,6 +69,8 @@ class TvRemoteRepository(private val db: AppDatabase) {
 
     suspend fun getMostRecentTv(): PairedTvEntity? = db.pairedTvDao().getMostRecent()
 
+    suspend fun isHostPaired(host: String): Boolean = db.pairedTvDao().getByHost(host) != null
+
     suspend fun toggleFavorite(app: TvAppCatalogItem, isCurrentlyFavorite: Boolean) {
         if (isCurrentlyFavorite) {
             db.favoriteAppDao().deleteByPackage(app.packageName)

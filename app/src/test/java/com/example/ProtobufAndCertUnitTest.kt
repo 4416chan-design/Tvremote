@@ -203,4 +203,29 @@ class ProtobufAndCertUnitTest {
             com.example.network.NetworkAdbClient.buildKeyEventShellCommand(TvKeyCodes.ALL_APPS)
         )
     }
+
+    @Test
+    fun `adb input text builder escapes spaces single quotes and handles Korean unicode check`() {
+        assertTrue(com.example.network.NetworkAdbClient.isAsciiInputSupported("it's youtube 123!"))
+        assertEquals(false, com.example.network.NetworkAdbClient.isAsciiInputSupported("오징어 게임"))
+
+        assertEquals(null, com.example.network.NetworkAdbClient.buildInputTextShellCommand("오징어"))
+
+        val cmd = com.example.network.NetworkAdbClient.buildInputTextShellCommand(
+            text = "it's tv",
+            clearCount = 3,
+            submitWithEnter = true
+        )
+        assertEquals(
+            "input keyevent 123 67 67 67; input text 'it'\\''s%stv' 2>&1; input keyevent 66 2>&1",
+            cmd
+        )
+
+        val clearOnly = com.example.network.NetworkAdbClient.buildInputTextShellCommand(
+            text = "",
+            clearCount = 2,
+            submitWithEnter = false
+        )
+        assertEquals("input keyevent 123 67 67 2>&1", clearOnly)
+    }
 }

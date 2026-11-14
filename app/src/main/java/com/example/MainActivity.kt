@@ -80,6 +80,13 @@ class MainActivity : ComponentActivity() {
                     viewModel.autoReconnectIfNeeded()
                 }
 
+                LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+                    val activity = context as? android.app.Activity
+                    if (activity?.isChangingConfigurations != true) {
+                        viewModel.onAppBackgrounded()
+                    }
+                }
+
                 LaunchedEffect(snackbarNotice) {
                     val notice = snackbarNotice ?: return@LaunchedEffect
                     val result = snackbarHostState.showSnackbar(
@@ -274,6 +281,7 @@ class MainActivity : ComponentActivity() {
                         tvName = tvName,
                         initialText = imePromptState.currentText,
                         isTvImeVisible = imePromptState.isTvImeVisible,
+                        isAdbConnected = adbState == com.example.network.AdbConnectionState.CONNECTED,
                         onSendText = viewModel::sendKeyboardText,
                         onSendKey = viewModel::sendKey,
                         onDismiss = viewModel::dismissKeyboardSheet

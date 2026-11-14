@@ -19,6 +19,9 @@ interface PairedTvDao {
 
     @Query("SELECT * FROM paired_tvs ORDER BY lastConnectedAt DESC LIMIT 1")
     suspend fun getMostRecent(): PairedTvEntity?
+
+    @Query("SELECT * FROM paired_tvs WHERE host = :host LIMIT 1")
+    suspend fun getByHost(host: String): PairedTvEntity?
 }
 
 @Dao
