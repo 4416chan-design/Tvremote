@@ -37,23 +37,32 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.data.model.TvKeyCodes
+import com.example.ui.rememberHapticHelper
 import com.example.ui.theme.DpadCenter
 import com.example.ui.theme.DpadCenterPressed
 import com.example.ui.theme.DpadInnerRing
 import com.example.ui.theme.DpadRing
 import com.example.ui.theme.MintGreen
 import com.example.ui.theme.TextPrimary
-import com.example.ui.theme.TextSecondary
 
 @Composable
 fun CircularDpadController(
     diameter: Dp,
+    hapticEnabled: Boolean = true,
     onKeyPress: (Int) -> Unit,
+    onRepeatKeyPress: (Int) -> Unit = onKeyPress,
     modifier: Modifier = Modifier
 ) {
+    val hapticHelper = rememberHapticHelper()
     val centerSize = diameter * 0.36f
     val arrowOffset = diameter * 0.34f
     val sectorHitSize = (diameter * 0.28f).coerceAtLeast(52.dp)
+
+    fun triggerDirectionTick() {
+        if (hapticEnabled) {
+            hapticHelper.vibrateClick(durationMs = 14L, amplitude = 150)
+        }
+    }
 
     Box(
         modifier = modifier
@@ -68,47 +77,63 @@ fun CircularDpadController(
             .border(width = 1.dp, color = Color(0xFF3A3D43), shape = CircleShape),
         contentAlignment = Alignment.Center
     ) {
-        // Up
+        // Up (supports hold-to-repeat)
         DpadDirectionButton(
             icon = Icons.Rounded.KeyboardArrowUp,
             contentDescription = stringResource(R.string.cd_dpad_up),
             hitSize = sectorHitSize,
             testTag = "dpad_up_button",
             modifier = Modifier.offset(y = -arrowOffset),
-            onClick = { onKeyPress(TvKeyCodes.DPAD_UP) }
+            onStep = { onKeyPress(TvKeyCodes.DPAD_UP) },
+            onRepeatStep = {
+                triggerDirectionTick()
+                onRepeatKeyPress(TvKeyCodes.DPAD_UP)
+            }
         )
 
-        // Down
+        // Down (supports hold-to-repeat)
         DpadDirectionButton(
             icon = Icons.Rounded.KeyboardArrowDown,
             contentDescription = stringResource(R.string.cd_dpad_down),
             hitSize = sectorHitSize,
             testTag = "dpad_down_button",
             modifier = Modifier.offset(y = arrowOffset),
-            onClick = { onKeyPress(TvKeyCodes.DPAD_DOWN) }
+            onStep = { onKeyPress(TvKeyCodes.DPAD_DOWN) },
+            onRepeatStep = {
+                triggerDirectionTick()
+                onRepeatKeyPress(TvKeyCodes.DPAD_DOWN)
+            }
         )
 
-        // Left
+        // Left (supports hold-to-repeat)
         DpadDirectionButton(
             icon = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
             contentDescription = stringResource(R.string.cd_dpad_left),
             hitSize = sectorHitSize,
             testTag = "dpad_left_button",
             modifier = Modifier.offset(x = -arrowOffset),
-            onClick = { onKeyPress(TvKeyCodes.DPAD_LEFT) }
+            onStep = { onKeyPress(TvKeyCodes.DPAD_LEFT) },
+            onRepeatStep = {
+                triggerDirectionTick()
+                onRepeatKeyPress(TvKeyCodes.DPAD_LEFT)
+            }
         )
 
-        // Right
+        // Right (supports hold-to-repeat)
         DpadDirectionButton(
             icon = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
             contentDescription = stringResource(R.string.cd_dpad_right),
             hitSize = sectorHitSize,
             testTag = "dpad_right_button",
             modifier = Modifier.offset(x = arrowOffset),
-            onClick = { onKeyPress(TvKeyCodes.DPAD_RIGHT) }
+            onStep = { onKeyPress(TvKeyCodes.DPAD_RIGHT) },
+            onRepeatStep = {
+                triggerDirectionTick()
+                onRepeatKeyPress(TvKeyCodes.DPAD_RIGHT)
+            }
         )
 
-        // Center OK button
+        // Center OK button (single tap only, never auto-repeats)
         val centerInteraction = remember { MutableInteractionSource() }
         val centerPressed by centerInteraction.collectIsPressedAsState()
         val centerScale by animateFloatAsState(
@@ -147,7 +172,8 @@ private fun DpadDirectionButton(
     hitSize: Dp,
     testTag: String,
     modifier: Modifier = Modifier,
-    onClick: () -> Unit
+    onStep: () -> Unit,
+    onRepeatStep: () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
@@ -163,11 +189,12 @@ private fun DpadDirectionButton(
             .size(hitSize)
             .scale(scale)
             .clip(CircleShape)
-            .clickable(
+            .holdToRepeatClickable(
                 interactionSource = interactionSource,
                 indication = ripple(bounded = true, color = MintGreen),
-                onClickLabel = contentDescription,
-                onClick = onClick
+                contentDescription = contentDescription,
+                onStep = onStep,
+                onRepeatStep = onRepeatStep
             )
             .testTag(testTag),
         contentAlignment = Alignment.Center

@@ -6,7 +6,6 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -232,19 +231,26 @@ fun FullBullnoseDialSlider(
                     }
                 }
 
-                // Minus button on left
+                // Minus button on left (hold-to-repeat)
+                val minusInteraction = remember { MutableInteractionSource() }
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterStart)
                         .size(height)
                         .clip(CircleShape)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
+                        .holdToRepeatClickable(
+                            interactionSource = minusInteraction,
                             indication = ripple(bounded = true, color = accentColor),
-                            onClickLabel = "감소",
-                            onClick = {
+                            contentDescription = "감소",
+                            onStep = {
                                 if (currentHapticEnabled) {
                                     hapticHelper.vibrateClick(durationMs = 16L, amplitude = 160)
+                                }
+                                currentOnStep(-1)
+                            },
+                            onRepeatStep = {
+                                if (currentHapticEnabled) {
+                                    hapticHelper.vibrateClick(durationMs = 12L, amplitude = 140)
                                 }
                                 currentOnStep(-1)
                             }
@@ -276,19 +282,26 @@ fun FullBullnoseDialSlider(
                         .testTag(valueTestTag)
                 )
 
-                // Plus button on right
+                // Plus button on right (hold-to-repeat)
+                val plusInteraction = remember { MutableInteractionSource() }
                 Box(
                     modifier = Modifier
                         .align(Alignment.CenterEnd)
                         .size(height)
                         .clip(CircleShape)
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
+                        .holdToRepeatClickable(
+                            interactionSource = plusInteraction,
                             indication = ripple(bounded = true, color = accentColor),
-                            onClickLabel = "증가",
-                            onClick = {
+                            contentDescription = "증가",
+                            onStep = {
                                 if (currentHapticEnabled) {
                                     hapticHelper.vibrateClick(durationMs = 16L, amplitude = 160)
+                                }
+                                currentOnStep(1)
+                            },
+                            onRepeatStep = {
+                                if (currentHapticEnabled) {
+                                    hapticHelper.vibrateClick(durationMs = 12L, amplitude = 140)
                                 }
                                 currentOnStep(1)
                             }

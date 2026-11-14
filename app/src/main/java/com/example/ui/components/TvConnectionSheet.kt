@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import com.example.data.local.PairedTvEntity
 import com.example.data.model.DiscoveredTv
 import com.example.data.model.TvConnectionState
+import com.example.network.AdbConnectionState
 import com.example.ui.theme.CharcoalBg
 import com.example.ui.theme.CharcoalBorder
 import com.example.ui.theme.CharcoalSurface
@@ -73,6 +74,7 @@ import com.example.ui.theme.MonoFontFamily
 import com.example.ui.theme.OnMintGreen
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import com.example.ui.theme.WarningAmber
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,7 +84,10 @@ fun TvConnectionSheet(
     isScanning: Boolean,
     scanError: String?,
     connectionState: TvConnectionState,
+    adbState: AdbConnectionState = AdbConnectionState.DISCONNECTED,
+    adbStatusDetail: String? = null,
     onRefreshScan: () -> Unit,
+    onRetryAdb: () -> Unit = {},
     onConnectTv: (host: String, name: String, remotePort: Int, pairingPort: Int) -> Unit,
     onDisconnect: () -> Unit,
     onDismiss: () -> Unit
@@ -212,6 +217,42 @@ fun TvConnectionSheet(
                             isConnected = true,
                             onClick = onDisconnect
                         )
+                    }
+                    item(key = "active_adb_status") {
+                        val (adbLabel, adbColor) = when (adbState) {
+                            AdbConnectionState.CONNECTED -> "ADB 5555 연결됨 · 백라이트 제어 준비 완료" to MintGreen
+                            AdbConnectionState.AUTHORIZING -> "TV 화면에서 디버깅 '허용'을 눌러주세요" to WarningAmber
+                            AdbConnectionState.CONNECTING -> "ADB(5555) 연결 시도 중..." to TextSecondary
+                            AdbConnectionState.UNAVAILABLE -> (adbStatusDetail ?: "TV 개발자 옵션 > 디버깅 확인") to WarningAmber
+                            AdbConnectionState.DISCONNECTED -> "ADB 5555 미연결" to TextSecondary
+                        }
+                        Surface(
+                            color = CharcoalSurface,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .border(1.dp, CharcoalBorder, RoundedCornerShape(16.dp))
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            ) {
+                                Text(
+                                    text = adbLabel,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = adbColor,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (adbState != AdbConnectionState.CONNECTED && adbState != AdbConnectionState.CONNECTING) {
+                                    TextButton(
+                                        onClick = onRetryAdb,
+                                        modifier = Modifier.testTag("retry_adb_button")
+                                    ) {
+                                        Text("ADB 연결", color = MintGreen)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

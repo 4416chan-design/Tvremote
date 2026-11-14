@@ -16,7 +16,7 @@ object ProtobufWire {
 
         fun writeVarintField(fieldNumber: Int, value: Int) {
             writeVarint(((fieldNumber shl 3) or 0).toLong())
-            writeVarint(value.toLong() and 0xFFFFFFFFL)
+            writeVarint(value.toLong())
         }
 
         fun writeBoolField(fieldNumber: Int, value: Boolean) {

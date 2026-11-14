@@ -9,13 +9,16 @@ import com.example.data.local.PairedTvEntity
 import com.example.data.local.RecentTvAppEntity
 import com.example.data.local.TvRemoteRepository
 import com.example.data.model.DiscoveredTv
+import com.example.data.model.TvAppCatalog
 import com.example.data.model.TvAppCatalogItem
 import com.example.data.model.TvConnectionState
 import com.example.data.model.TvImePromptState
 import com.example.data.model.TvKeyCodes
+import com.example.network.AdbConnectionState
 import com.example.network.AndroidTvPairingClient
 import com.example.network.AndroidTvRemoteClient
 import com.example.network.ClientCertStore
+import com.example.network.NetworkAdbClient
 import com.example.network.TvDiscoveryManager
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -34,14 +37,27 @@ data class SnackbarNotice(
     val onAction: (() -> Unit)? = null
 )
 
+private data class PendingAppLaunch(
+    val appName: String,
+    val targetPackage: String,
+    val marketFallbackUri: String,
+    val usedNativeScheme: Boolean,
+    val sentAtMs: Long,
+    val fallbackJob: Job? = null
+)
+
 class RemoteViewModel(
     private val repository: TvRemoteRepository,
     private val certStore: ClientCertStore,
-    private val discoveryManager: TvDiscoveryManager
+    private val discoveryManager: TvDiscoveryManager,
+    private val adbClient: NetworkAdbClient
 ) : ViewModel() {
 
     private val _connectionState = MutableStateFlow<TvConnectionState>(TvConnectionState.Disconnected)
     val connectionState: StateFlow<TvConnectionState> = _connectionState.asStateFlow()
+
+    val adbState: StateFlow<AdbConnectionState> = adbClient.adbState
+    val adbStatusDetail: StateFlow<String?> = adbClient.adbStatusDetail
 
     val discoveredTvs: StateFlow<List<DiscoveredTv>> = discoveryManager.discoveredTvs
     val isScanning: StateFlow<Boolean> = discoveryManager.isScanning
@@ -101,6 +117,11 @@ class RemoteViewModel(
     private var volumeSettleJob: Job? = null
     private val volumeStepQueue = Channel<Int>(Channel.UNLIMITED)
 
+    private var adbConnectJob: Job? = null
+    private var brightnessSyncJob: Job? = null
+    private var lastPictureFallbackNoticeMs: Long = 0L
+    private var pendingAppLaunch: PendingAppLaunch? = null
+
     private val pairingClient = AndroidTvPairingClient(certStore)
     private val remoteClient = AndroidTvRemoteClient(
         certStore = certStore,
@@ -109,6 +130,11 @@ class RemoteViewModel(
                 if (state is TvConnectionState.Connected) {
                     state.copy(currentAppPackage = packageName)
                 } else state
+            }
+            val pending = pendingAppLaunch
+            if (pending != null && packageName.equals(pending.targetPackage, ignoreCase = true)) {
+                pending.fallbackJob?.cancel()
+                pendingAppLaunch = null
             }
             viewModelScope.launch {
                 repository.recordRecentApp(packageName = packageName, source = "TV")
@@ -145,16 +171,46 @@ class RemoteViewModel(
                 } else state
             }
         },
+        onRemoteError = { _, detail ->
+            val pending = pendingAppLaunch
+            if (pending != null && System.currentTimeMillis() - pending.sentAtMs < 3_000L) {
+                triggerAppLaunchPlayStoreFallback(pending, reason = detail)
+            }
+        },
         onDisconnected = { cause ->
-            _connectionState.value = if (cause != null) {
-                TvConnectionState.Error(cause.message ?: "TV 연결이 끊어졌습니다.")
+            val pending = pendingAppLaunch
+            val droppedDuringAppLaunch = pending != null &&
+                System.currentTimeMillis() - pending.sentAtMs < 2_500L
+            pending?.fallbackJob?.cancel()
+            pendingAppLaunch = null
+            adbConnectJob?.cancel()
+            adbClient.disconnect()
+
+            if (droppedDuringAppLaunch) {
+                _connectionState.value = TvConnectionState.Disconnected
+                viewModelScope.launch {
+                    delay(350)
+                    lastAutoReconnectAttemptMs = 0L
+                    autoReconnectIfNeeded()
+                }
             } else {
-                TvConnectionState.Disconnected
+                _connectionState.value = if (cause != null) {
+                    TvConnectionState.Error(cause.message ?: "TV 연결이 끊어졌습니다.")
+                } else {
+                    TvConnectionState.Disconnected
+                }
             }
         }
     )
 
     init {
+        viewModelScope.launch {
+            adbClient.adbState.collect { state ->
+                if (state == AdbConnectionState.AUTHORIZING) {
+                    showMessage("TV 화면에서 네트워크 디버깅(ADB) '허용'을 선택해 주세요.")
+                }
+            }
+        }
         viewModelScope.launch {
             for (step in volumeStepQueue) {
                 if (!remoteClient.isConnected) continue
@@ -179,6 +235,22 @@ class RemoteViewModel(
                 )
             }
         }
+    }
+
+    private fun startAdbAutoConnect(host: String) {
+        adbConnectJob?.cancel()
+        adbConnectJob = viewModelScope.launch {
+            adbClient.connect(host, NetworkAdbClient.DEFAULT_ADB_PORT)
+        }
+    }
+
+    fun retryAdbConnect() {
+        val connectedHost = (_connectionState.value as? TvConnectionState.Connected)?.host
+        if (connectedHost.isNullOrBlank()) {
+            showMessage("먼저 Wi-Fi TV에 연결해 주세요.")
+            return
+        }
+        startAdbAutoConnect(connectedHost)
     }
 
     fun autoReconnectIfNeeded() {
@@ -248,6 +320,7 @@ class RemoteViewModel(
                 )
                 _isTvPickerVisible.value = false
                 discoveryManager.stopDiscovery()
+                startAdbAutoConnect(cleanHost)
                 return@launch
             }
 
@@ -304,6 +377,7 @@ class RemoteViewModel(
                     remotePort = current.remotePort
                 )
                 showMessage("${current.tvName}에 연결되었습니다.")
+                startAdbAutoConnect(current.host)
             } else {
                 val msg = connectResult.exceptionOrNull()?.message ?: "페어링 후 연결에 실패했습니다."
                 _connectionState.value = TvConnectionState.Error(msg, current.host)
@@ -318,6 +392,8 @@ class RemoteViewModel(
     }
 
     fun disconnectTv() {
+        adbConnectJob?.cancel()
+        adbClient.disconnect()
         remoteClient.disconnect(notify = false)
         _connectionState.value = TvConnectionState.Disconnected
         showMessage("TV 연결이 해제되었습니다.")
@@ -327,6 +403,8 @@ class RemoteViewModel(
         viewModelScope.launch {
             val active = _connectionState.value
             if (active is TvConnectionState.Connected && active.host == host) {
+                adbConnectJob?.cancel()
+                adbClient.disconnect()
                 remoteClient.disconnect(notify = false)
                 _connectionState.value = TvConnectionState.Disconnected
             }
@@ -379,19 +457,77 @@ class RemoteViewModel(
         accentHex: Long
     ) {
         if (!ensureConnectedOrPrompt()) return
+
+        val marketUri = TvAppCatalog.marketUriForPackage(packageName)
+        val safeUri = if (TvAppCatalog.isLegacyBrokenUri(launchUri)) {
+            TvAppCatalog.launchUriForPackage(packageName)
+        } else {
+            launchUri.trim()
+        }
+        val usesNativeScheme = !safeUri.startsWith("market://", ignoreCase = true)
+
+        pendingAppLaunch?.fallbackJob?.cancel()
+        pendingAppLaunch = null
+
         viewModelScope.launch {
             runCatching {
-                remoteClient.sendAppLink(launchUri)
+                val launchedViaScheme = safeUri
+                if (usesNativeScheme) {
+                    val pending = PendingAppLaunch(
+                        appName = appName,
+                        targetPackage = packageName,
+                        marketFallbackUri = marketUri,
+                        usedNativeScheme = true,
+                        sentAtMs = System.currentTimeMillis(),
+                        fallbackJob = launch {
+                            delay(1_400)
+                            val activePending = pendingAppLaunch ?: return@launch
+                            if (activePending.targetPackage == packageName) {
+                                triggerAppLaunchPlayStoreFallback(activePending, reason = null)
+                            }
+                        }
+                    )
+                    pendingAppLaunch = pending
+                }
+
+                remoteClient.sendAppLink(launchedViaScheme)
                 repository.recordRecentApp(
                     packageName = packageName,
                     appName = appName,
-                    launchUri = launchUri,
+                    launchUri = safeUri,
                     iconKey = iconKey,
                     accentHex = accentHex,
                     source = "REMOTE"
                 )
             }.onFailure {
-                showMessage("${appName} 실행 실패: ${it.message}")
+                // If sending the custom scheme failed cleanly without dropping, try Play Store URI directly
+                val fallbackResult = runCatching {
+                    remoteClient.sendAppLink(marketUri)
+                }
+                if (fallbackResult.isSuccess) {
+                    showMessage("${appName} Play 스토어 페이지를 열었습니다.")
+                } else {
+                    showMessage("${appName} 실행 실패: ${it.message}")
+                }
+            }
+        }
+    }
+
+    private fun triggerAppLaunchPlayStoreFallback(pending: PendingAppLaunch, reason: String?) {
+        pending.fallbackJob?.cancel()
+        pendingAppLaunch = null
+        if (!remoteClient.isConnected) return
+        viewModelScope.launch {
+            runCatching {
+                remoteClient.sendAppLink(pending.marketFallbackUri)
+                val msg = if (!reason.isNullOrBlank()) {
+                    "${pending.appName} 딥링크 미지원으로 Play 스토어를 열었습니다."
+                } else {
+                    "${pending.appName} 바로 실행 응답이 없어 Play 스토어를 열었습니다."
+                }
+                showMessage(msg)
+            }.onFailure {
+                showMessage("${pending.appName} Play 스토어 열기 실패: ${it.message}")
             }
         }
     }
@@ -519,36 +655,70 @@ class RemoteViewModel(
         val next = (current + delta).coerceIn(5, 100)
         if (next == current) return
         setBrightnessPercent(next)
-        viewModelScope.launch {
-            val keyCode = if (delta > 0) TvKeyCodes.BRIGHTNESS_UP else TvKeyCodes.BRIGHTNESS_DOWN
-            val steps = kotlin.math.abs(delta).coerceAtMost(5)
-            repeat(steps) {
-                runCatching { remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT) }
-            }
+
+        brightnessSyncJob?.cancel()
+        brightnessSyncJob = viewModelScope.launch {
+            delay(220)
+            syncBrightnessWithFallback(next, allowOpenPictureSettings = true)
         }
     }
 
     fun toggleDayNightBrightness() {
         if (!ensureConnectedOrPrompt()) return
         val current = preferences.value.brightnessPercent
-        // Toggle between Night brightness (30%) and Day brightness (60%)
         val target = if (current <= 35) 60 else 30
-        val keyCode = if (target > current) TvKeyCodes.BRIGHTNESS_UP else TvKeyCodes.BRIGHTNESS_DOWN
         setBrightnessPercent(target)
-        viewModelScope.launch {
-            repeat(5) {
-                runCatching { remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT) }
+
+        brightnessSyncJob?.cancel()
+        brightnessSyncJob = viewModelScope.launch {
+            syncBrightnessWithFallback(target, allowOpenPictureSettings = true)
+        }
+    }
+
+    private suspend fun syncBrightnessWithFallback(targetPercent: Int, allowOpenPictureSettings: Boolean) {
+        val result = adbClient.applyTvBrightnessPercent(targetPercent)
+        if (result.adbConnected && result.hardwareApplied) {
+            return
+        }
+
+        // Also transmit standard brightness keycode in case firmware responds to HID key
+        val keyCode = if (targetPercent >= 50) TvKeyCodes.BRIGHTNESS_UP else TvKeyCodes.BRIGHTNESS_DOWN
+        runCatching { remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT) }
+
+        if (allowOpenPictureSettings) {
+            val now = System.currentTimeMillis()
+            if (now - lastPictureFallbackNoticeMs > 4_000L) {
+                lastPictureFallbackNoticeMs = now
+                openTvPictureSettingsInternal()
+                val msg = when {
+                    adbClient.adbState.value == AdbConnectionState.AUTHORIZING ->
+                        "TV에서 ADB 디버깅 '허용' 후 직접 제어가 가능합니다. 사진 설정을 열었습니다."
+                    result.adbConnected ->
+                        "샤오미 TV 백라이트 직접 변경 미지원 — TV 사진 설정을 열었습니다."
+                    else ->
+                        "ADB(5555) 미연결 — TV 사진/디스플레이 설정을 열었습니다."
+                }
+                _snackbarNotice.value = SnackbarNotice(
+                    message = msg,
+                    actionLabel = "ADB 재연결",
+                    onAction = { retryAdbConnect() }
+                )
             }
-            _snackbarNotice.value = SnackbarNotice(
-                message = "TV 밝기 ${target}% 전환 (미지원 시 화질 설정에서 조정)",
-                actionLabel = "화질 설정",
-                onAction = { openTvPictureSettings() }
-            )
         }
     }
 
     fun openTvPictureSettings() {
-        sendKey(TvKeyCodes.SETTINGS)
+        if (!ensureConnectedOrPrompt()) return
+        viewModelScope.launch {
+            openTvPictureSettingsInternal()
+        }
+    }
+
+    private suspend fun openTvPictureSettingsInternal() {
+        val openedViaAdb = adbClient.openDisplayPictureSettings()
+        if (!openedViaAdb) {
+            runCatching { remoteClient.sendKey(TvKeyCodes.SETTINGS, AndroidTvRemoteClient.DIRECTION_SHORT) }
+        }
     }
 
     private fun setBrightnessPercent(percent: Int) {
@@ -599,6 +769,10 @@ class RemoteViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        adbConnectJob?.cancel()
+        brightnessSyncJob?.cancel()
+        pendingAppLaunch?.fallbackJob?.cancel()
+        adbClient.disconnect()
         discoveryManager.stopDiscovery()
         pairingClient.close()
         remoteClient.disconnect(notify = false)
@@ -607,11 +781,12 @@ class RemoteViewModel(
     class Factory(
         private val repository: TvRemoteRepository,
         private val certStore: ClientCertStore,
-        private val discoveryManager: TvDiscoveryManager
+        private val discoveryManager: TvDiscoveryManager,
+        private val adbClient: NetworkAdbClient
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return RemoteViewModel(repository, certStore, discoveryManager) as T
+            return RemoteViewModel(repository, certStore, discoveryManager, adbClient) as T
         }
     }
 }

@@ -51,14 +51,17 @@ data class TvAppCatalogItem(
     val iconKey: String,
     val accentHex: Long,
     val category: String
-)
+) {
+    val marketFallbackUri: String
+        get() = "market://details?id=$packageName"
+}
 
 object TvAppCatalog {
     val apps: List<TvAppCatalogItem> = listOf(
         TvAppCatalogItem(
             packageName = "com.google.android.youtube.tv",
             appName = "YouTube",
-            launchUri = "market://launch?id=com.google.android.youtube.tv",
+            launchUri = "vnd.youtube://",
             iconKey = "youtube",
             accentHex = 0xFFFF3D3D,
             category = "동영상"
@@ -66,7 +69,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.netflix.ninja",
             appName = "Netflix",
-            launchUri = "market://launch?id=com.netflix.ninja",
+            launchUri = "nflx://",
             iconKey = "netflix",
             accentHex = 0xFFE50914,
             category = "OTT"
@@ -74,7 +77,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.disney.disneyplus",
             appName = "Disney+",
-            launchUri = "market://launch?id=com.disney.disneyplus",
+            launchUri = "disneyplus://",
             iconKey = "disney",
             accentHex = 0xFF33A1FD,
             category = "OTT"
@@ -82,7 +85,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "net.cj.cjhv.gs.tving",
             appName = "TVING",
-            launchUri = "market://launch?id=net.cj.cjhv.gs.tving",
+            launchUri = "tving://",
             iconKey = "tving",
             accentHex = 0xFFFF153C,
             category = "국내 OTT"
@@ -90,7 +93,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "kr.co.captv.pooqV2",
             appName = "Wavve",
-            launchUri = "market://launch?id=kr.co.captv.pooqV2",
+            launchUri = "wavve://",
             iconKey = "wavve",
             accentHex = 0xFF2B67FF,
             category = "국내 OTT"
@@ -98,7 +101,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.coupang.mobile.play",
             appName = "쿠팡플레이",
-            launchUri = "market://launch?id=com.coupang.mobile.play",
+            launchUri = "coupangplay://",
             iconKey = "coupang",
             accentHex = 0xFF00A7E1,
             category = "국내 OTT"
@@ -106,7 +109,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.frograms.watcha",
             appName = "Watcha",
-            launchUri = "market://launch?id=com.frograms.watcha",
+            launchUri = "watcha://",
             iconKey = "watcha",
             accentHex = 0xFFFF0558,
             category = "국내 OTT"
@@ -114,7 +117,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.spotify.tv.android",
             appName = "Spotify",
-            launchUri = "market://launch?id=com.spotify.tv.android",
+            launchUri = "spotify://",
             iconKey = "spotify",
             accentHex = 0xFF1DB954,
             category = "음악"
@@ -122,7 +125,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.amazon.amazonvideo.livingroom",
             appName = "Prime Video",
-            launchUri = "market://launch?id=com.amazon.amazonvideo.livingroom",
+            launchUri = "market://details?id=com.amazon.amazonvideo.livingroom",
             iconKey = "prime",
             accentHex = 0xFF00A8E1,
             category = "OTT"
@@ -130,7 +133,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.apple.atve.androidtv.appletv",
             appName = "Apple TV",
-            launchUri = "market://launch?id=com.apple.atve.androidtv.appletv",
+            launchUri = "market://details?id=com.apple.atve.androidtv.appletv",
             iconKey = "appletv",
             accentHex = 0xFFE5E7EB,
             category = "OTT"
@@ -138,7 +141,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "tv.twitch.android.app",
             appName = "Twitch",
-            launchUri = "market://launch?id=tv.twitch.android.app",
+            launchUri = "twitch://",
             iconKey = "twitch",
             accentHex = 0xFF9146FF,
             category = "스트리밍"
@@ -146,7 +149,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.plexapp.android",
             appName = "Plex",
-            launchUri = "market://launch?id=com.plexapp.android",
+            launchUri = "plex://",
             iconKey = "plex",
             accentHex = 0xFFE5A00D,
             category = "미디어 서버"
@@ -154,7 +157,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "org.xbmc.kodi",
             appName = "Kodi",
-            launchUri = "market://launch?id=org.xbmc.kodi",
+            launchUri = "market://details?id=org.xbmc.kodi",
             iconKey = "kodi",
             accentHex = 0xFF17B2E7,
             category = "미디어 서버"
@@ -162,7 +165,7 @@ object TvAppCatalog {
         TvAppCatalogItem(
             packageName = "com.google.android.videos",
             appName = "Google TV",
-            launchUri = "market://launch?id=com.google.android.videos",
+            launchUri = "market://details?id=com.google.android.videos",
             iconKey = "googletv",
             accentHex = 0xFF6CD98E,
             category = "시스템"
@@ -180,8 +183,17 @@ object TvAppCatalog {
 
     fun launchUriForPackage(packageName: String): String {
         findByPackage(packageName)?.let { return it.launchUri }
-        return "market://launch?id=$packageName"
+        return marketUriForPackage(packageName)
     }
+
+    fun marketUriForPackage(packageName: String): String =
+        "market://details?id=$packageName"
+
+    fun isLegacyBrokenUri(uri: String): Boolean =
+        uri.isBlank() ||
+            uri.startsWith("market://launch", ignoreCase = true) ||
+            uri.startsWith("http://", ignoreCase = true) ||
+            uri.startsWith("https://", ignoreCase = true)
 
     fun iconKeyForPackage(packageName: String): String =
         findByPackage(packageName)?.iconKey ?: "app_generic"

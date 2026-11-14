@@ -236,10 +236,12 @@ fun RemoteScreen(
                 // 4. Center Circular D-Pad
                 CircularDpadController(
                     diameter = dpadDiameter,
+                    hapticEnabled = hapticEnabled,
                     onKeyPress = { code ->
                         triggerHaptic()
                         onKeyPress(code)
-                    }
+                    },
+                    onRepeatKeyPress = onKeyPress
                 )
 
                 // 5. Bottom 2x3 Circular Action Grid

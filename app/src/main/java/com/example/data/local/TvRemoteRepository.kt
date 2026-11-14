@@ -31,7 +31,7 @@ class TvRemoteRepository(private val db: AppDatabase) {
         } else {
             val existingFavs = db.favoriteAppDao().getAllFavoritesOnce()
             val migratedFavs = existingFavs.mapNotNull { fav ->
-                if (!fav.launchUri.startsWith("market://launch")) {
+                if (TvAppCatalog.isLegacyBrokenUri(fav.launchUri)) {
                     fav.copy(launchUri = TvAppCatalog.launchUriForPackage(fav.packageName))
                 } else null
             }
@@ -42,7 +42,7 @@ class TvRemoteRepository(private val db: AppDatabase) {
 
         val existingRecents = db.recentTvAppDao().getRecentAppsOnce()
         val migratedRecents = existingRecents.mapNotNull { rec ->
-            if (!rec.launchUri.startsWith("market://launch")) {
+            if (TvAppCatalog.isLegacyBrokenUri(rec.launchUri)) {
                 rec.copy(launchUri = TvAppCatalog.launchUriForPackage(rec.packageName))
             } else null
         }

@@ -44,7 +44,7 @@ class MainActivity : ComponentActivity() {
 
     private val viewModel: RemoteViewModel by viewModels {
         val app = application as TvRemoteApplication
-        RemoteViewModel.Factory(app.repository, app.certStore, app.discoveryManager)
+        RemoteViewModel.Factory(app.repository, app.certStore, app.discoveryManager, app.adbClient)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -73,6 +73,8 @@ class MainActivity : ComponentActivity() {
                 val isTvPickerVisible by viewModel.isTvPickerVisible.collectAsStateWithLifecycle()
                 val isVoiceListening by viewModel.isVoiceListening.collectAsStateWithLifecycle()
                 val snackbarNotice by viewModel.snackbarNotice.collectAsStateWithLifecycle()
+                val adbState by viewModel.adbState.collectAsStateWithLifecycle()
+                val adbStatusDetail by viewModel.adbStatusDetail.collectAsStateWithLifecycle()
 
                 LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
                     viewModel.autoReconnectIfNeeded()
@@ -242,7 +244,10 @@ class MainActivity : ComponentActivity() {
                         isScanning = isScanning,
                         scanError = scanError,
                         connectionState = connectionState,
+                        adbState = adbState,
+                        adbStatusDetail = adbStatusDetail,
                         onRefreshScan = viewModel::refreshDiscovery,
+                        onRetryAdb = viewModel::retryAdbConnect,
                         onConnectTv = { host, name, rPort, pPort ->
                             viewModel.connectToTv(host, name, rPort, pPort)
                         },
@@ -268,6 +273,7 @@ class MainActivity : ComponentActivity() {
                     KeyboardInputSheet(
                         tvName = tvName,
                         initialText = imePromptState.currentText,
+                        isTvImeVisible = imePromptState.isTvImeVisible,
                         onSendText = viewModel::sendKeyboardText,
                         onSendKey = viewModel::sendKey,
                         onDismiss = viewModel::dismissKeyboardSheet

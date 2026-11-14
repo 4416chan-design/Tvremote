@@ -599,7 +599,7 @@ private fun AddCustomAppDialog(
             Button(
                 onClick = {
                     val effectiveUri = uri.trim().ifBlank {
-                        if (pkg.isNotBlank()) "market://launch?id=${pkg.trim()}" else ""
+                        if (pkg.isNotBlank()) "market://details?id=${pkg.trim()}" else ""
                     }
                     onConfirm(name, effectiveUri, pkg)
                 },

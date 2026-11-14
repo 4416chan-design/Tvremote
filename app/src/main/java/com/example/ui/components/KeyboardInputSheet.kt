@@ -72,6 +72,7 @@ import com.example.ui.theme.TextSecondary
 fun KeyboardInputSheet(
     tvName: String,
     initialText: String,
+    isTvImeVisible: Boolean = false,
     onSendText: (text: String, replaceExisting: Boolean, submitWithEnter: Boolean) -> Unit,
     onSendKey: (Int) -> Unit,
     onDismiss: () -> Unit
@@ -79,7 +80,7 @@ fun KeyboardInputSheet(
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val focusRequester = remember { FocusRequester() }
 
-    var fieldValue by remember(initialText) {
+    var fieldValue by remember {
         mutableStateOf(
             TextFieldValue(
                 text = initialText,
@@ -87,8 +88,19 @@ fun KeyboardInputSheet(
             )
         )
     }
+    var userEditedLocally by remember { mutableStateOf(false) }
     var liveSyncMode by remember { mutableStateOf(false) }
-    var lastSyncedCommittedText by remember(initialText) { mutableStateOf(initialText) }
+    var lastSyncedCommittedText by remember { mutableStateOf(initialText) }
+
+    LaunchedEffect(initialText) {
+        if (!userEditedLocally && fieldValue.text.isEmpty() && initialText.isNotEmpty()) {
+            fieldValue = TextFieldValue(
+                text = initialText,
+                selection = TextRange(initialText.length)
+            )
+            lastSyncedCommittedText = initialText
+        }
+    }
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
@@ -120,12 +132,18 @@ fun KeyboardInputSheet(
                     modifier = Modifier.size(22.dp)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = "키보드 입력",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = TextPrimary,
-                    modifier = Modifier.weight(1f)
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "키보드 입력",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = if (isTvImeVisible) "TV 입력창 연결됨" else "TV에서 검색창을 먼저 선택하세요",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (isTvImeVisible) MintGreen else TextSecondary
+                    )
+                }
 
                 Surface(
                     color = if (liveSyncMode) MintGreenContainer else CharcoalSurface,
@@ -180,6 +198,7 @@ fun KeyboardInputSheet(
             OutlinedTextField(
                 value = fieldValue,
                 onValueChange = { next ->
+                    userEditedLocally = true
                     fieldValue = next
                     if (liveSyncMode && next.composition == null && next.text != lastSyncedCommittedText) {
                         lastSyncedCommittedText = next.text
