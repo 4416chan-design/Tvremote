@@ -31,6 +31,17 @@ data class AdbBrightnessResult(
     val message: String? = null
 )
 
+enum class AdbAppLaunchOutcome {
+    LAUNCHED_APP,
+    OPENED_PLAY_STORE,
+    FAILED
+}
+
+data class AdbAppLaunchResult(
+    val outcome: AdbAppLaunchOutcome,
+    val detail: String? = null
+)
+
 /**
  * Lightweight pure-Kotlin ADB-over-TCP (port 5555) client supporting RSA authentication,
  * shell command execution, Xiaomi TV A Pro backlight probes/writes, and TV Picture Settings fallback.
@@ -282,6 +293,64 @@ class NetworkAdbClient(
             !res.contains("Exception", ignoreCase = true)
     }
 
+    /**
+     * Injects an Android KeyEvent directly at system InputManager level (`input keyevent <code >`),
+     * allowing accessibility/button-remapping apps (e.g., Button Mapper) to intercept KEYCODE_ALL_APPS (284).
+     */
+    suspend fun sendKeyEvent(keyCode: Int): Result<Unit> {
+        if (!isConnected) {
+            return Result.failure(IllegalStateException("ADB 미연결"))
+        }
+        val cmd = buildKeyEventShellCommand(keyCode)
+            ?: return Result.failure(IllegalArgumentException("잘못된 키코드: $keyCode"))
+        val shellResult = shell(cmd)
+        if (shellResult.isFailure) {
+            return Result.failure(shellResult.exceptionOrNull() ?: IllegalStateException("ADB 키 전송 실패"))
+        }
+        val out = shellResult.getOrDefault("")
+        if (out.contains("Error:", ignoreCase = true) || out.contains("Exception", ignoreCase = true)) {
+            return Result.failure(IllegalStateException(out))
+        }
+        return Result.success(Unit)
+    }
+
+    /**
+     * Launches a TV app directly via ADB shell without touching port 6466 sendAppLink,
+     * preventing Xiaomi TV A Pro Remote Service disconnections.
+     * Falls back to opening the Play Store detail page via ADB if the package is not installed.
+     */
+    suspend fun launchAppPackage(packageName: String, fallbackUri: String? = null): AdbAppLaunchResult {
+        if (!isConnected) {
+            return AdbAppLaunchResult(AdbAppLaunchOutcome.FAILED, "ADB 미연결")
+        }
+        val cmd = buildAppLaunchShellCommand(packageName, fallbackUri)
+            ?: return AdbAppLaunchResult(AdbAppLaunchOutcome.FAILED, "잘못된 앱 패키지 정보")
+
+        val shellResult = shell(cmd)
+        if (shellResult.isFailure) {
+            return AdbAppLaunchResult(
+                outcome = AdbAppLaunchOutcome.FAILED,
+                detail = shellResult.exceptionOrNull()?.message
+            )
+        }
+
+        val out = shellResult.getOrDefault("")
+        val status = out.substringAfter("STATUS=", "").substringBefore("|OUT=").trim()
+        val detail = out.substringAfter("|OUT=", "").trim()
+        val hasError = detail.contains("Error:", ignoreCase = true) ||
+            detail.contains("Exception", ignoreCase = true) ||
+            detail.contains("No activities found", ignoreCase = true)
+
+        return when {
+            status == "APP" && !hasError -> AdbAppLaunchResult(AdbAppLaunchOutcome.LAUNCHED_APP)
+            status == "STORE" && !hasError -> AdbAppLaunchResult(AdbAppLaunchOutcome.OPENED_PLAY_STORE)
+            else -> AdbAppLaunchResult(
+                outcome = AdbAppLaunchOutcome.FAILED,
+                detail = detail.ifBlank { "앱 실행에 실패했습니다." }
+            )
+        }
+    }
+
     fun disconnect() {
         connectedHost = null
         lastVerifiedHardwareBacklightSupport = null
@@ -373,5 +442,55 @@ class NetworkAdbClient(
         private const val ADB_AUTH_TOKEN = 1
         private const val ADB_AUTH_SIGNATURE = 2
         private const val ADB_AUTH_RSAPUBLICKEY = 3
+
+        private val SAFE_PACKAGE_REGEX = Regex("^[A-Za-z0-9._-]+$")
+        private val SAFE_URI_REGEX = Regex("^[A-Za-z0-9+._:/?=&%-]+$")
+
+        fun sanitizePackageName(raw: String): String? {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty() || !trimmed.contains('.') || !SAFE_PACKAGE_REGEX.matches(trimmed)) {
+                return null
+            }
+            return trimmed
+        }
+
+        fun buildKeyEventShellCommand(keyCode: Int): String? {
+            if (keyCode <= 0) return null
+            return "input keyevent $keyCode 2>&1"
+        }
+
+        fun buildAppLaunchShellCommand(packageName: String, fallbackUri: String? = null): String? {
+            val pkg = sanitizePackageName(packageName)
+            if (pkg != null) {
+                return buildString {
+                    append("PKG=\"$pkg\"; ")
+                    append("if pm path \"\$PKG\" >/dev/null 2>&1; then ")
+                    append("ACT=\$(cmd package resolve-activity --brief -c android.intent.category.LEANBACK_LAUNCHER \"\$PKG\" 2>/dev/null | tail -n 1); ")
+                    append("case \"\$ACT\" in ")
+                    append("*/*) OUT=\$(am start -n \"\$ACT\" 2>&1) ;; ")
+                    append("*) ")
+                    append("ACT=\$(cmd package resolve-activity --brief -c android.intent.category.LAUNCHER \"\$PKG\" 2>/dev/null | tail -n 1); ")
+                    append("case \"\$ACT\" in ")
+                    append("*/*) OUT=\$(am start -n \"\$ACT\" 2>&1) ;; ")
+                    append("*) OUT=\$(monkey -p \"\$PKG\" -c android.intent.category.LEANBACK_LAUNCHER 1 2>&1 || monkey -p \"\$PKG\" -c android.intent.category.LAUNCHER 1 2>&1) ;; ")
+                    append("esac ;; ")
+                    append("esac; ")
+                    append("case \"\$OUT\" in ")
+                    append("*Error:*|*Exception*) OUT=\$(monkey -p \"\$PKG\" -c android.intent.category.LEANBACK_LAUNCHER 1 2>&1 || monkey -p \"\$PKG\" -c android.intent.category.LAUNCHER 1 2>&1) ;; ")
+                    append("esac; ")
+                    append("echo \"STATUS=APP|OUT=\$OUT\"; ")
+                    append("else ")
+                    append("OUT=\$(am start -a android.intent.action.VIEW -d \"market://details?id=\$PKG\" 2>&1); ")
+                    append("echo \"STATUS=STORE|OUT=\$OUT\"; ")
+                    append("fi")
+                }
+            }
+
+            val cleanUri = fallbackUri?.trim().orEmpty()
+            if (cleanUri.isNotEmpty() && SAFE_URI_REGEX.matches(cleanUri)) {
+                return "OUT=\$(am start -a android.intent.action.VIEW -d \"$cleanUri\" 2>&1); echo \"STATUS=APP|OUT=\$OUT\""
+            }
+            return null
+        }
     }
 }

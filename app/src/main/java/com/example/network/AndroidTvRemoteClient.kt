@@ -168,18 +168,23 @@ class AndroidTvRemoteClient(
                     }
                     val textStatus = imeFields.firstOrNull { it.number == 2 }?.asMessage()
                     if (textStatus != null) {
-                        syncImeTextStatus(textStatus)
+                        syncImeTextStatus(textStatus, isShowRequest = false)
                     }
+                }
+                21 -> { // remote_ime_batch_edit (TV echoes/acknowledges updated ime_counter, field_counter & text)
+                    val batchFields = field.asMessage()
+                    syncIncomingImeBatchEdit(batchFields)
                 }
                 22 -> { // remote_ime_show_request
                     val showFields = field.asMessage()
                     val textStatus = showFields.firstOrNull { it.number == 2 }?.asMessage()
                     if (textStatus != null) {
-                        syncImeTextStatus(textStatus)
-                        onImeShowRequested(fieldCounter, trackedTvText)
+                        syncImeTextStatus(textStatus, isShowRequest = true)
                     } else {
-                        onImeShowRequested(fieldCounter, trackedTvText)
+                        imeCounter = 0
+                        trackedTvText = ""
                     }
+                    onImeShowRequested(fieldCounter, trackedTvText)
                 }
                 50 -> { // remote_set_volume_level (6=volume_max, 7=volume_level, 8=volume_muted)
                     val (level, max, muted) = parseVolumeLevel(field.asMessage())
@@ -189,16 +194,44 @@ class AndroidTvRemoteClient(
         }
     }
 
-    private fun syncImeTextStatus(textStatus: List<ProtobufWire.Field>) {
-        textStatus.firstOrNull { it.number == 1 }?.varint?.toInt()?.let { fc ->
-            fieldCounter = fc
+    private fun syncIncomingImeBatchEdit(batchFields: List<ProtobufWire.Field>) {
+        batchFields.firstOrNull { it.number == 1 }?.varint?.toInt()?.let { tvImeCounter ->
+            imeCounter = tvImeCounter
         }
-        textStatus.firstOrNull { it.number == 2 }?.asString()?.let { value ->
-            trackedTvText = value
+        batchFields.firstOrNull { it.number == 2 }?.varint?.toInt()?.let { tvFieldCounter ->
+            fieldCounter = tvFieldCounter
         }
-        textStatus.firstOrNull { it.number == 5 }?.varint?.toInt()?.let { tvCounter ->
-            if (tvCounter > imeCounter) {
-                imeCounter = tvCounter
+        val edits = batchFields.filter { it.number == 3 }
+        for (editField in edits) {
+            val editMsg = editField.asMessage()
+            val imeObj = editMsg.firstOrNull { it.number == 2 }?.asMessage() ?: continue
+            val value = imeObj.firstOrNull { it.number == 3 }?.asString() ?: continue
+            val start = imeObj.firstOrNull { it.number == 1 }?.varint?.toInt()
+            val end = imeObj.firstOrNull { it.number == 2 }?.varint?.toInt()
+            trackedTvText = applyTextEdit(trackedTvText, start, end, value)
+        }
+    }
+
+    private fun syncImeTextStatus(textStatus: List<ProtobufWire.Field>, isShowRequest: Boolean) {
+        val incomingFc = textStatus.firstOrNull { it.number == 1 }?.varint?.toInt()
+        val incomingValue = textStatus.firstOrNull { it.number == 2 }?.asString()
+        val incomingInt5 = textStatus.firstOrNull { it.number == 5 }?.varint?.toInt()
+
+        val fieldChanged = incomingFc != null && incomingFc != fieldCounter
+        if (incomingFc != null) {
+            fieldCounter = incomingFc
+        }
+
+        if (isShowRequest || fieldChanged) {
+            // Fresh input field (or explicit show request): proto3 omits empty string / 0 counter on wire
+            trackedTvText = incomingValue ?: ""
+            imeCounter = incomingInt5 ?: 0
+        } else {
+            if (incomingValue != null) {
+                trackedTvText = incomingValue
+            }
+            if (incomingInt5 != null) {
+                imeCounter = incomingInt5
             }
         }
     }
@@ -230,47 +263,31 @@ class AndroidTvRemoteClient(
 
     /**
      * Sends UTF-8 text (Korean Hangul & English) to TV IME via serialized RemoteImeBatchEdit.
-     * Tracks TV-side fieldCounter and text length, and delays slightly before sending ENTER so
-     * Android TV InputConnection finishes committing before form submission.
+     * Matches Android TV Remote v2 wire format: RemoteEditInfo.insert = 0, [start, end) selection
+     * bounds synced with trackedTvText, and imeCounter matched/incremented per edit.
      */
     suspend fun sendText(text: String, replaceExisting: Boolean = false, submitWithEnter: Boolean = false) {
         imeMutex.withLock {
-            val counter = ++imeCounter
+            val counter = imeCounter
             val fc = fieldCounter
             val currentLength = trackedTvText.length
-            val startPos: Int
-            val endPos: Int
-            val insertOp: Int
+            val startPos = if (replaceExisting) 0 else currentLength
+            val endPos = currentLength
 
-            if (replaceExisting) {
-                insertOp = if (currentLength > 0 || text.isEmpty()) 2 else 1
-                startPos = 0
-                endPos = if (text.isEmpty() && currentLength == 0) 256 else currentLength
-            } else {
-                insertOp = 1
-                startPos = -1
-                endPos = -1
-            }
-
-            val payload = ProtobufWire.encode {
-                writeMessageField(21) { // remote_ime_batch_edit
-                    writeVarintField(1, counter)
-                    writeVarintField(2, fc)
-                    writeMessageField(3) { // edit_info
-                        writeVarintField(1, insertOp)
-                        writeMessageField(2) { // RemoteImeObject
-                            writeVarintField(1, startPos)
-                            writeVarintField(2, endPos)
-                            writeStringField(3, text)
-                        }
-                    }
-                }
-            }
+            val payload = buildImeBatchEditPayload(
+                imeCounter = counter,
+                fieldCounter = fc,
+                start = startPos,
+                end = endPos,
+                text = text,
+                insert = 0
+            )
             sendRaw(payload)
+            imeCounter = counter + 1
             trackedTvText = if (replaceExisting) text else trackedTvText + text
 
             if (submitWithEnter) {
-                kotlinx.coroutines.delay(140)
+                kotlinx.coroutines.delay(150)
                 sendKey(TvKeyCodes.ENTER, DIRECTION_SHORT)
             }
         }
@@ -309,6 +326,36 @@ class AndroidTvRemoteClient(
             val level = (volFields.firstOrNull { it.number == 7 }?.varint?.toInt() ?: 0).coerceIn(0, max)
             val muted = (volFields.firstOrNull { it.number == 8 }?.varint ?: 0L) != 0L
             return Triple(level, max, muted)
+        }
+
+        fun buildImeBatchEditPayload(
+            imeCounter: Int,
+            fieldCounter: Int,
+            start: Int,
+            end: Int,
+            text: String,
+            insert: Int = 0
+        ): ByteArray = ProtobufWire.encode {
+            writeMessageField(21) { // remote_ime_batch_edit
+                writeVarintField(1, imeCounter)
+                writeVarintField(2, fieldCounter)
+                writeMessageField(3) { // edit_info (RemoteEditInfo)
+                    writeVarintField(1, insert)
+                    writeMessageField(2) { // text_field_status (RemoteImeObject)
+                        writeVarintField(1, start)
+                        writeVarintField(2, end)
+                        writeStringField(3, text)
+                    }
+                }
+            }
+        }
+
+        fun applyTextEdit(existing: String, start: Int?, end: Int?, replacement: String): String {
+            if (start == null || end == null || start < 0 || end < start || start > existing.length) {
+                return replacement
+            }
+            val safeEnd = end.coerceIn(start, existing.length)
+            return existing.substring(0, start) + replacement + existing.substring(safeEnd)
         }
     }
 }

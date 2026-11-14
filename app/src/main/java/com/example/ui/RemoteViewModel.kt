@@ -14,6 +14,7 @@ import com.example.data.model.TvAppCatalogItem
 import com.example.data.model.TvConnectionState
 import com.example.data.model.TvImePromptState
 import com.example.data.model.TvKeyCodes
+import com.example.network.AdbAppLaunchOutcome
 import com.example.network.AdbConnectionState
 import com.example.network.AndroidTvPairingClient
 import com.example.network.AndroidTvRemoteClient
@@ -35,15 +36,6 @@ data class SnackbarNotice(
     val message: String,
     val actionLabel: String? = null,
     val onAction: (() -> Unit)? = null
-)
-
-private data class PendingAppLaunch(
-    val appName: String,
-    val targetPackage: String,
-    val marketFallbackUri: String,
-    val usedNativeScheme: Boolean,
-    val sentAtMs: Long,
-    val fallbackJob: Job? = null
 )
 
 class RemoteViewModel(
@@ -120,7 +112,6 @@ class RemoteViewModel(
     private var adbConnectJob: Job? = null
     private var brightnessSyncJob: Job? = null
     private var lastPictureFallbackNoticeMs: Long = 0L
-    private var pendingAppLaunch: PendingAppLaunch? = null
 
     private val pairingClient = AndroidTvPairingClient(certStore)
     private val remoteClient = AndroidTvRemoteClient(
@@ -130,11 +121,6 @@ class RemoteViewModel(
                 if (state is TvConnectionState.Connected) {
                     state.copy(currentAppPackage = packageName)
                 } else state
-            }
-            val pending = pendingAppLaunch
-            if (pending != null && packageName.equals(pending.targetPackage, ignoreCase = true)) {
-                pending.fallbackJob?.cancel()
-                pendingAppLaunch = null
             }
             viewModelScope.launch {
                 repository.recordRecentApp(packageName = packageName, source = "TV")
@@ -172,33 +158,17 @@ class RemoteViewModel(
             }
         },
         onRemoteError = { _, detail ->
-            val pending = pendingAppLaunch
-            if (pending != null && System.currentTimeMillis() - pending.sentAtMs < 3_000L) {
-                triggerAppLaunchPlayStoreFallback(pending, reason = detail)
+            if (!detail.isNullOrBlank()) {
+                showMessage(detail)
             }
         },
         onDisconnected = { cause ->
-            val pending = pendingAppLaunch
-            val droppedDuringAppLaunch = pending != null &&
-                System.currentTimeMillis() - pending.sentAtMs < 2_500L
-            pending?.fallbackJob?.cancel()
-            pendingAppLaunch = null
             adbConnectJob?.cancel()
             adbClient.disconnect()
-
-            if (droppedDuringAppLaunch) {
-                _connectionState.value = TvConnectionState.Disconnected
-                viewModelScope.launch {
-                    delay(350)
-                    lastAutoReconnectAttemptMs = 0L
-                    autoReconnectIfNeeded()
-                }
+            _connectionState.value = if (cause != null) {
+                TvConnectionState.Error(cause.message ?: "TV 연결이 끊어졌습니다.")
             } else {
-                _connectionState.value = if (cause != null) {
-                    TvConnectionState.Error(cause.message ?: "TV 연결이 끊어졌습니다.")
-                } else {
-                    TvConnectionState.Disconnected
-                }
+                TvConnectionState.Disconnected
             }
         }
     )
@@ -414,10 +384,38 @@ class RemoteViewModel(
 
     fun sendKey(keyCode: Int) {
         if (!ensureConnectedOrPrompt()) return
+        if (keyCode == TvKeyCodes.ALL_APPS) {
+            sendAllAppsKey()
+            return
+        }
         viewModelScope.launch {
             runCatching {
                 remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT)
             }.onFailure { showMessage(it.message ?: "명령 전송 실패") }
+        }
+    }
+
+    private fun sendAllAppsKey() {
+        val connectedHost = (_connectionState.value as? TvConnectionState.Connected)?.host
+        viewModelScope.launch {
+            if (!adbClient.isConnected && !connectedHost.isNullOrBlank()) {
+                adbClient.connect(connectedHost, NetworkAdbClient.DEFAULT_ADB_PORT)
+            }
+            if (adbClient.isConnected) {
+                var adbResult = adbClient.sendKeyEvent(TvKeyCodes.ALL_APPS)
+                if (adbResult.isFailure && !adbClient.isConnected && !connectedHost.isNullOrBlank()) {
+                    if (adbClient.connect(connectedHost, NetworkAdbClient.DEFAULT_ADB_PORT)) {
+                        adbResult = adbClient.sendKeyEvent(TvKeyCodes.ALL_APPS)
+                    }
+                }
+                if (adbResult.isSuccess) {
+                    return@launch
+                }
+            }
+            // Fallback to Wi-Fi remote protocol if ADB 5555 is unavailable or not yet authorized
+            runCatching {
+                remoteClient.sendKey(TvKeyCodes.ALL_APPS, AndroidTvRemoteClient.DIRECTION_SHORT)
+            }.onFailure { showMessage(it.message ?: "전체 앱 명령 전송 실패") }
         }
     }
 
@@ -453,78 +451,68 @@ class RemoteViewModel(
         accentHex: Long
     ) {
         if (!ensureConnectedOrPrompt()) return
+        val connectedHost = (_connectionState.value as? TvConnectionState.Connected)?.host
+        if (connectedHost.isNullOrBlank()) return
 
-        val marketUri = TvAppCatalog.marketUriForPackage(packageName)
         val safeUri = if (TvAppCatalog.isLegacyBrokenUri(launchUri)) {
             TvAppCatalog.launchUriForPackage(packageName)
         } else {
             launchUri.trim()
         }
-        val usesNativeScheme = !safeUri.startsWith("market://", ignoreCase = true)
-
-        pendingAppLaunch?.fallbackJob?.cancel()
-        pendingAppLaunch = null
 
         viewModelScope.launch {
-            runCatching {
-                val launchedViaScheme = safeUri
-                if (usesNativeScheme) {
-                    val pending = PendingAppLaunch(
-                        appName = appName,
-                        targetPackage = packageName,
-                        marketFallbackUri = marketUri,
-                        usedNativeScheme = true,
-                        sentAtMs = System.currentTimeMillis(),
-                        fallbackJob = launch {
-                            delay(1_400)
-                            val activePending = pendingAppLaunch ?: return@launch
-                            if (activePending.targetPackage == packageName) {
-                                triggerAppLaunchPlayStoreFallback(activePending, reason = null)
-                            }
-                        }
-                    )
-                    pendingAppLaunch = pending
+            if (!adbClient.isConnected) {
+                adbClient.connect(connectedHost, NetworkAdbClient.DEFAULT_ADB_PORT)
+            }
+
+            if (adbClient.isConnected) {
+                var result = adbClient.launchAppPackage(packageName = packageName, fallbackUri = safeUri)
+                // If an idle ADB socket dropped mid-command, reconnect once automatically and retry
+                if (result.outcome == AdbAppLaunchOutcome.FAILED && !adbClient.isConnected) {
+                    if (adbClient.connect(connectedHost, NetworkAdbClient.DEFAULT_ADB_PORT)) {
+                        result = adbClient.launchAppPackage(packageName = packageName, fallbackUri = safeUri)
+                    }
                 }
 
-                remoteClient.sendAppLink(launchedViaScheme)
-                repository.recordRecentApp(
-                    packageName = packageName,
-                    appName = appName,
-                    launchUri = safeUri,
-                    iconKey = iconKey,
-                    accentHex = accentHex,
-                    source = "REMOTE"
-                )
-            }.onFailure {
-                // If sending the custom scheme failed cleanly without dropping, try Play Store URI directly
-                val fallbackResult = runCatching {
-                    remoteClient.sendAppLink(marketUri)
+                when (result.outcome) {
+                    AdbAppLaunchOutcome.LAUNCHED_APP -> {
+                        repository.recordRecentApp(
+                            packageName = packageName,
+                            appName = appName,
+                            launchUri = safeUri,
+                            iconKey = iconKey,
+                            accentHex = accentHex,
+                            source = "REMOTE"
+                        )
+                    }
+                    AdbAppLaunchOutcome.OPENED_PLAY_STORE -> {
+                        repository.recordRecentApp(
+                            packageName = packageName,
+                            appName = appName,
+                            launchUri = safeUri,
+                            iconKey = iconKey,
+                            accentHex = accentHex,
+                            source = "REMOTE"
+                        )
+                        showMessage("${appName} 앱이 설치되어 있지 않아 Play 스토어를 열었습니다.")
+                    }
+                    AdbAppLaunchOutcome.FAILED -> {
+                        showMessage("${appName} 실행 실패: ${result.detail ?: "ADB 명령 오류"}")
+                    }
                 }
-                if (fallbackResult.isSuccess) {
-                    showMessage("${appName} Play 스토어 페이지를 열었습니다.")
-                } else {
-                    showMessage("${appName} 실행 실패: ${it.message}")
-                }
+                return@launch
             }
-        }
-    }
 
-    private fun triggerAppLaunchPlayStoreFallback(pending: PendingAppLaunch, reason: String?) {
-        pending.fallbackJob?.cancel()
-        pendingAppLaunch = null
-        if (!remoteClient.isConnected) return
-        viewModelScope.launch {
-            runCatching {
-                remoteClient.sendAppLink(pending.marketFallbackUri)
-                val msg = if (!reason.isNullOrBlank()) {
-                    "${pending.appName} 딥링크 미지원으로 Play 스토어를 열었습니다."
-                } else {
-                    "${pending.appName} 바로 실행 응답이 없어 Play 스토어를 열었습니다."
-                }
-                showMessage(msg)
-            }.onFailure {
-                showMessage("${pending.appName} Play 스토어 열기 실패: ${it.message}")
+            val msg = if (adbClient.adbState.value == AdbConnectionState.AUTHORIZING) {
+                "TV 화면에서 네트워크 디버깅(ADB) '허용'을 선택한 뒤 다시 눌러주세요."
+            } else {
+                "즐겨찾기 실행을 위해 ADB(5555) 연결이 필요합니다. TV 개발자 옵션을 확인해 주세요."
             }
+            _snackbarNotice.value = SnackbarNotice(
+                message = msg,
+                actionLabel = "ADB 연결",
+                onAction = { retryAdbConnect() }
+            )
         }
     }
 
@@ -767,7 +755,6 @@ class RemoteViewModel(
         super.onCleared()
         adbConnectJob?.cancel()
         brightnessSyncJob?.cancel()
-        pendingAppLaunch?.fallbackJob?.cancel()
         adbClient.disconnect()
         discoveryManager.stopDiscovery()
         pairingClient.close()

@@ -145,4 +145,62 @@ class ProtobufAndCertUnitTest {
         assertEquals(100, mMax)
         assertEquals(true, mMuted)
     }
+
+    @Test
+    fun `ime batch edit payload uses insert zero and preserves counters and range`() {
+        val payload = com.example.network.AndroidTvRemoteClient.buildImeBatchEditPayload(
+            imeCounter = 0,
+            fieldCounter = 3,
+            start = 0,
+            end = 4,
+            text = "유튜브 검색",
+            insert = 0
+        )
+        val root = ProtobufWire.parseFields(payload)
+        val batchEdit = root.first { it.number == 21 }.asMessage()
+        assertEquals(0L, batchEdit.first { it.number == 1 }.varint)
+        assertEquals(3L, batchEdit.first { it.number == 2 }.varint)
+
+        val editInfo = batchEdit.first { it.number == 3 }.asMessage()
+        assertEquals(0L, editInfo.first { it.number == 1 }.varint)
+
+        val imeObj = editInfo.first { it.number == 2 }.asMessage()
+        assertEquals(0L, imeObj.first { it.number == 1 }.varint)
+        assertEquals(4L, imeObj.first { it.number == 2 }.varint)
+        assertEquals("유튜브 검색", imeObj.first { it.number == 3 }.asString())
+    }
+
+    @Test
+    fun `apply text edit handles full replacement and range edits safely`() {
+        assertEquals(
+            "새 검색어",
+            com.example.network.AndroidTvRemoteClient.applyTextEdit("기존", 0, 2, "새 검색어")
+        )
+        assertEquals(
+            "abXYef",
+            com.example.network.AndroidTvRemoteClient.applyTextEdit("abcdef", 2, 4, "XY")
+        )
+    }
+
+    @Test
+    fun `adb app launcher builds safe shell command and rejects injection`() {
+        assertEquals(null, com.example.network.NetworkAdbClient.sanitizePackageName("bad; rm -rf /"))
+        assertEquals("com.google.android.youtube.tv", com.example.network.NetworkAdbClient.sanitizePackageName(" com.google.android.youtube.tv "))
+
+        val cmd = com.example.network.NetworkAdbClient.buildAppLaunchShellCommand("com.google.android.youtube.tv")!!
+        assertTrue(cmd.contains("LEANBACK_LAUNCHER"))
+        assertTrue(cmd.contains("market://details?id=\$PKG"))
+        assertTrue(cmd.contains("STATUS=APP"))
+        assertTrue(cmd.contains("STATUS=STORE"))
+    }
+
+    @Test
+    fun `adb keyevent builder formats KEYCODE_ALL_APPS 284 and rejects invalid codes`() {
+        assertEquals(null, com.example.network.NetworkAdbClient.buildKeyEventShellCommand(0))
+        assertEquals(null, com.example.network.NetworkAdbClient.buildKeyEventShellCommand(-1))
+        assertEquals(
+            "input keyevent 284 2>&1",
+            com.example.network.NetworkAdbClient.buildKeyEventShellCommand(TvKeyCodes.ALL_APPS)
+        )
+    }
 }

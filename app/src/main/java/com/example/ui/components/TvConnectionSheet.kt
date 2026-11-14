@@ -220,7 +220,7 @@ fun TvConnectionSheet(
                     }
                     item(key = "active_adb_status") {
                         val (adbLabel, adbColor) = when (adbState) {
-                            AdbConnectionState.CONNECTED -> "ADB 5555 연결됨 · 백라이트 제어 준비 완료" to MintGreen
+                            AdbConnectionState.CONNECTED -> "ADB 5555 연결됨 · 백라이트·즐겨찾기 실행 준비 완료" to MintGreen
                             AdbConnectionState.AUTHORIZING -> "TV 화면에서 디버깅 '허용'을 눌러주세요" to WarningAmber
                             AdbConnectionState.CONNECTING -> "ADB(5555) 연결 시도 중..." to TextSecondary
                             AdbConnectionState.UNAVAILABLE -> (adbStatusDetail ?: "TV 개발자 옵션 > 디버깅 확인") to WarningAmber
