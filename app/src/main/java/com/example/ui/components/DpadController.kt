@@ -13,9 +13,9 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.KeyboardArrowLeft
-import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.minimumInteractiveComponentSize
@@ -90,7 +90,7 @@ fun CircularDpadController(
 
         // Left
         DpadDirectionButton(
-            icon = Icons.Rounded.KeyboardArrowLeft,
+            icon = Icons.AutoMirrored.Rounded.KeyboardArrowLeft,
             contentDescription = stringResource(R.string.cd_dpad_left),
             hitSize = sectorHitSize,
             testTag = "dpad_left_button",
@@ -100,7 +100,7 @@ fun CircularDpadController(
 
         // Right
         DpadDirectionButton(
-            icon = Icons.Rounded.KeyboardArrowRight,
+            icon = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
             contentDescription = stringResource(R.string.cd_dpad_right),
             hitSize = sectorHitSize,
             testTag = "dpad_right_button",

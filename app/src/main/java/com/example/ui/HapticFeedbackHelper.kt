@@ -25,7 +25,7 @@ class HapticFeedbackHelper(context: Context) {
         val v = vibrator ?: return
         if (!v.hasVibrator()) return
         runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 val effect = VibrationEffect.createOneShot(durationMs, amplitude)
                 val attrs = VibrationAttributes.Builder()
                     .setUsage(VibrationAttributes.USAGE_TOUCH)

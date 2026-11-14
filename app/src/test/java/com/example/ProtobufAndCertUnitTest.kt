@@ -78,4 +78,33 @@ class ProtobufAndCertUnitTest {
         assertEquals(220, TvKeyCodes.BRIGHTNESS_DOWN)
         assertEquals(221, TvKeyCodes.BRIGHTNESS_UP)
     }
+
+    @Test
+    fun `remote set volume level parses max level and muted from fields 6 7 8`() {
+        val unmutedPayload = ProtobufWire.encode {
+            writeMessageField(50) {
+                writeVarintField(6, 100) // volume_max
+                writeVarintField(7, 18)  // volume_level
+                writeVarintField(8, 0)   // volume_muted = false
+            }
+        }
+        val unmutedMsg = ProtobufWire.parseFields(unmutedPayload).first { it.number == 50 }.asMessage()
+        val (level, max, muted) = com.example.network.AndroidTvRemoteClient.parseVolumeLevel(unmutedMsg)
+        assertEquals(18, level)
+        assertEquals(100, max)
+        assertEquals(false, muted)
+
+        val mutedPayload = ProtobufWire.encode {
+            writeMessageField(50) {
+                writeVarintField(6, 100)
+                writeVarintField(7, 18)
+                writeVarintField(8, 1)   // volume_muted = true
+            }
+        }
+        val mutedMsg = ProtobufWire.parseFields(mutedPayload).first { it.number == 50 }.asMessage()
+        val (mLevel, mMax, mMuted) = com.example.network.AndroidTvRemoteClient.parseVolumeLevel(mutedMsg)
+        assertEquals(18, mLevel)
+        assertEquals(100, mMax)
+        assertEquals(true, mMuted)
+    }
 }

@@ -94,6 +94,7 @@ class AndroidTvRemoteClient(
             }
             sendRaw(activeReply)
         }
+        handleIncomingFields(activeFields)
 
         isConnected = true
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -109,47 +110,7 @@ class AndroidTvRemoteClient(
             while (isConnected) {
                 val frame = ProtobufWire.readFramedMessage(input)
                 val fields = ProtobufWire.parseFields(frame)
-                for (field in fields) {
-                    when (field.number) {
-                        8 -> { // remote_ping_request
-                            val pingFields = field.asMessage()
-                            val val1 = pingFields.firstOrNull { it.number == 1 }?.varint?.toInt() ?: 0
-                            val pong = ProtobufWire.encode {
-                                writeMessageField(9) {
-                                    writeVarintField(1, val1)
-                                }
-                            }
-                            sendRaw(pong)
-                        }
-                        20 -> { // remote_ime_key_inject (reports active app & IME status)
-                            val imeFields = field.asMessage()
-                            val appInfo = imeFields.firstOrNull { it.number == 1 }?.asMessage()
-                            val pkg = appInfo?.firstOrNull { it.number == 3 }?.asString()
-                            if (!pkg.isNullOrBlank()) {
-                                onForegroundAppChanged(pkg)
-                            }
-                            val textStatus = imeFields.firstOrNull { it.number == 2 }?.asMessage()
-                            if (textStatus != null) {
-                                fieldCounter = textStatus.firstOrNull { it.number == 1 }?.varint?.toInt() ?: fieldCounter
-                            }
-                        }
-                        22 -> { // remote_ime_show_request
-                            val showFields = field.asMessage()
-                            val textStatus = showFields.firstOrNull { it.number == 2 }?.asMessage()
-                            val fc = textStatus?.firstOrNull { it.number == 1 }?.varint?.toInt() ?: fieldCounter
-                            val currentText = textStatus?.firstOrNull { it.number == 2 }?.asString().orEmpty()
-                            fieldCounter = fc
-                            onImeShowRequested(fc, currentText)
-                        }
-                        50 -> { // remote_set_volume_level
-                            val volFields = field.asMessage()
-                            val level = volFields.firstOrNull { it.number == 5 }?.varint?.toInt() ?: 0
-                            val max = volFields.firstOrNull { it.number == 6 }?.varint?.toInt() ?: 100
-                            val muted = (volFields.firstOrNull { it.number == 7 }?.varint ?: 0L) != 0L
-                            onVolumeChanged(level, max, muted)
-                        }
-                    }
-                }
+                handleIncomingFields(fields)
             }
         } catch (t: Throwable) {
             if (isConnected) {
@@ -162,6 +123,47 @@ class AndroidTvRemoteClient(
             isConnected = false
             if (wasConnected) {
                 onDisconnected(disconnectCause)
+            }
+        }
+    }
+
+    private suspend fun handleIncomingFields(fields: List<ProtobufWire.Field>) {
+        for (field in fields) {
+            when (field.number) {
+                8 -> { // remote_ping_request
+                    val pingFields = field.asMessage()
+                    val val1 = pingFields.firstOrNull { it.number == 1 }?.varint?.toInt() ?: 0
+                    val pong = ProtobufWire.encode {
+                        writeMessageField(9) {
+                            writeVarintField(1, val1)
+                        }
+                    }
+                    sendRaw(pong)
+                }
+                20 -> { // remote_ime_key_inject (reports active app & IME status)
+                    val imeFields = field.asMessage()
+                    val appInfo = imeFields.firstOrNull { it.number == 1 }?.asMessage()
+                    val pkg = appInfo?.firstOrNull { it.number == 3 }?.asString()
+                    if (!pkg.isNullOrBlank()) {
+                        onForegroundAppChanged(pkg)
+                    }
+                    val textStatus = imeFields.firstOrNull { it.number == 2 }?.asMessage()
+                    if (textStatus != null) {
+                        fieldCounter = textStatus.firstOrNull { it.number == 1 }?.varint?.toInt() ?: fieldCounter
+                    }
+                }
+                22 -> { // remote_ime_show_request
+                    val showFields = field.asMessage()
+                    val textStatus = showFields.firstOrNull { it.number == 2 }?.asMessage()
+                    val fc = textStatus?.firstOrNull { it.number == 1 }?.varint?.toInt() ?: fieldCounter
+                    val currentText = textStatus?.firstOrNull { it.number == 2 }?.asString().orEmpty()
+                    fieldCounter = fc
+                    onImeShowRequested(fc, currentText)
+                }
+                50 -> { // remote_set_volume_level (6=volume_max, 7=volume_level, 8=volume_muted)
+                    val (level, max, muted) = parseVolumeLevel(field.asMessage())
+                    onVolumeChanged(level, max, muted)
+                }
             }
         }
     }
@@ -243,5 +245,12 @@ class AndroidTvRemoteClient(
         const val DIRECTION_START_LONG = 1
         const val DIRECTION_END_LONG = 2
         const val DIRECTION_SHORT = 3
+
+        fun parseVolumeLevel(volFields: List<ProtobufWire.Field>): Triple<Int, Int, Boolean> {
+            val max = (volFields.firstOrNull { it.number == 6 }?.varint?.toInt() ?: 100).coerceAtLeast(1)
+            val level = (volFields.firstOrNull { it.number == 7 }?.varint?.toInt() ?: 0).coerceIn(0, max)
+            val muted = (volFields.firstOrNull { it.number == 8 }?.varint ?: 0L) != 0L
+            return Triple(level, max, muted)
+        }
     }
 }

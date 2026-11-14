@@ -5,10 +5,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Input
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.ClosedCaption
 import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.Input
 import androidx.compose.material.icons.rounded.LiveTv
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Movie
@@ -91,7 +91,7 @@ fun TvAppBadgeIcon(
 }
 
 fun customActionIcon(iconKey: String): ImageVector = when (iconKey) {
-    "input" -> Icons.Rounded.Input
+    "input" -> Icons.AutoMirrored.Rounded.Input
     "captions" -> Icons.Rounded.ClosedCaption
     "channel_up" -> Icons.Rounded.LiveTv
     "channel_down" -> Icons.Rounded.LiveTv

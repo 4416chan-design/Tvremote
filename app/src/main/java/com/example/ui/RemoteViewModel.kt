@@ -17,6 +17,8 @@ import com.example.network.AndroidTvPairingClient
 import com.example.network.AndroidTvRemoteClient
 import com.example.network.ClientCertStore
 import com.example.network.TvDiscoveryManager
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -94,6 +96,10 @@ class RemoteViewModel(
     val snackbarNotice: StateFlow<SnackbarNotice?> = _snackbarNotice.asStateFlow()
 
     private var lastAutoReconnectAttemptMs: Long = 0L
+    private var lastLocalVolumeAdjustMs: Long = 0L
+    private var lastTvReportedVolume: Int? = null
+    private var volumeSettleJob: Job? = null
+    private val volumeStepQueue = Channel<Int>(Channel.UNLIMITED)
 
     private val pairingClient = AndroidTvPairingClient(certStore)
     private val remoteClient = AndroidTvRemoteClient(
@@ -120,12 +126,22 @@ class RemoteViewModel(
         },
         onVolumeChanged = { level, max, muted ->
             val safeMax = max.coerceAtLeast(1)
+            val clampedLevel = level.coerceIn(0, safeMax)
+            lastTvReportedVolume = clampedLevel
             _maxVolume.value = safeMax
-            _volumeLevel.value = level.coerceIn(0, safeMax)
             _isMuted.value = muted
+
+            val recentlyDraggedLocally = System.currentTimeMillis() - lastLocalVolumeAdjustMs < 550L
+            if (!recentlyDraggedLocally) {
+                _volumeLevel.value = clampedLevel
+            }
             _connectionState.update { state ->
                 if (state is TvConnectionState.Connected) {
-                    state.copy(currentVolume = level, maxVolume = safeMax, isMuted = muted)
+                    state.copy(
+                        currentVolume = if (recentlyDraggedLocally) _volumeLevel.value else clampedLevel,
+                        maxVolume = safeMax,
+                        isMuted = muted
+                    )
                 } else state
             }
         },
@@ -139,6 +155,16 @@ class RemoteViewModel(
     )
 
     init {
+        viewModelScope.launch {
+            for (step in volumeStepQueue) {
+                if (!remoteClient.isConnected) continue
+                val keyCode = if (step > 0) TvKeyCodes.VOLUME_UP else TvKeyCodes.VOLUME_DOWN
+                repeat(kotlin.math.abs(step)) {
+                    runCatching { remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT) }
+                    delay(28)
+                }
+            }
+        }
         viewModelScope.launch {
             repository.ensureDefaultsInitialized()
             lastAutoReconnectAttemptMs = System.currentTimeMillis()
@@ -459,15 +485,23 @@ class RemoteViewModel(
             return
         }
         if (!ensureConnectedOrPrompt()) return
+
+        lastLocalVolumeAdjustMs = System.currentTimeMillis()
         _volumeLevel.value = next
         if (_isMuted.value && delta > 0) {
             _isMuted.value = false
         }
-        viewModelScope.launch {
-            val keyCode = if (delta > 0) TvKeyCodes.VOLUME_UP else TvKeyCodes.VOLUME_DOWN
-            val steps = kotlin.math.abs(delta).coerceAtMost(5)
-            repeat(steps) {
-                runCatching { remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT) }
+
+        val effectiveSteps = (next - current).coerceIn(-5, 5)
+        if (effectiveSteps != 0) {
+            volumeStepQueue.trySend(effectiveSteps)
+        }
+
+        volumeSettleJob?.cancel()
+        volumeSettleJob = viewModelScope.launch {
+            delay(650)
+            lastTvReportedVolume?.let { tvLevel ->
+                _volumeLevel.value = tvLevel.coerceIn(0, _maxVolume.value.coerceAtLeast(1))
             }
         }
     }
