@@ -176,6 +176,12 @@ class AndroidTvRemoteClient(
         sendRaw(payload)
     }
 
+    suspend fun sendPressAndReleaseKey(keyCode: Int) {
+        sendKey(keyCode, DIRECTION_START_LONG)
+        kotlinx.coroutines.delay(65)
+        sendKey(keyCode, DIRECTION_END_LONG)
+    }
+
     suspend fun sendAppLink(appLinkUri: String) {
         val payload = ProtobufWire.encode {
             writeMessageField(90) { // remote_app_link_launch_request

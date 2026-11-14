@@ -26,6 +26,9 @@ interface FavoriteAppDao {
     @Query("SELECT * FROM favorite_apps ORDER BY sortOrder ASC")
     fun getAllFavorites(): Flow<List<FavoriteAppEntity>>
 
+    @Query("SELECT * FROM favorite_apps ORDER BY sortOrder ASC")
+    suspend fun getAllFavoritesOnce(): List<FavoriteAppEntity>
+
     @Query("SELECT COUNT(*) FROM favorite_apps")
     suspend fun count(): Int
 
@@ -47,8 +50,14 @@ interface RecentTvAppDao {
     @Query("SELECT * FROM recent_tv_apps ORDER BY lastUsedAt DESC")
     fun getRecentApps(): Flow<List<RecentTvAppEntity>>
 
+    @Query("SELECT * FROM recent_tv_apps")
+    suspend fun getRecentAppsOnce(): List<RecentTvAppEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(app: RecentTvAppEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(apps: List<RecentTvAppEntity>)
 
     @Query("DELETE FROM recent_tv_apps WHERE packageName = :packageName")
     suspend fun deleteByPackage(packageName: String)

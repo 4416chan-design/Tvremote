@@ -4,12 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.AppPreferencesEntity
-import com.example.data.local.CustomButtonEntity
 import com.example.data.local.FavoriteAppEntity
 import com.example.data.local.PairedTvEntity
 import com.example.data.local.RecentTvAppEntity
 import com.example.data.local.TvRemoteRepository
-import com.example.data.model.CustomActionType
 import com.example.data.model.DiscoveredTv
 import com.example.data.model.TvAppCatalogItem
 import com.example.data.model.TvConnectionState
@@ -27,6 +25,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+data class SnackbarNotice(
+    val message: String,
+    val actionLabel: String? = null,
+    val onAction: (() -> Unit)? = null
+)
 
 class RemoteViewModel(
     private val repository: TvRemoteRepository,
@@ -59,12 +63,6 @@ class RemoteViewModel(
         initialValue = emptyList()
     )
 
-    val customButtons: StateFlow<List<CustomButtonEntity>> = repository.customButtons.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
-        initialValue = emptyList()
-    )
-
     val preferences: StateFlow<AppPreferencesEntity> = repository.preferences.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
@@ -92,8 +90,10 @@ class RemoteViewModel(
     private val _isMuted = MutableStateFlow(false)
     val isMuted: StateFlow<Boolean> = _isMuted.asStateFlow()
 
-    private val _snackbarMessage = MutableStateFlow<String?>(null)
-    val snackbarMessage: StateFlow<String?> = _snackbarMessage.asStateFlow()
+    private val _snackbarNotice = MutableStateFlow<SnackbarNotice?>(null)
+    val snackbarNotice: StateFlow<SnackbarNotice?> = _snackbarNotice.asStateFlow()
+
+    private var lastAutoReconnectAttemptMs: Long = 0L
 
     private val pairingClient = AndroidTvPairingClient(certStore)
     private val remoteClient = AndroidTvRemoteClient(
@@ -141,6 +141,7 @@ class RemoteViewModel(
     init {
         viewModelScope.launch {
             repository.ensureDefaultsInitialized()
+            lastAutoReconnectAttemptMs = System.currentTimeMillis()
             val lastTv = repository.getMostRecentTv()
             if (lastTv != null) {
                 connectToTv(
@@ -151,6 +152,30 @@ class RemoteViewModel(
                     silentIfOffline = true
                 )
             }
+        }
+    }
+
+    fun autoReconnectIfNeeded() {
+        val current = _connectionState.value
+        if (current is TvConnectionState.Connected ||
+            current is TvConnectionState.Connecting ||
+            current is TvConnectionState.PairingRequired
+        ) {
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastAutoReconnectAttemptMs < 3000L) return
+        lastAutoReconnectAttemptMs = now
+
+        viewModelScope.launch {
+            val lastTv = repository.getMostRecentTv() ?: return@launch
+            connectToTv(
+                host = lastTv.host,
+                tvName = lastTv.name,
+                remotePort = lastTv.remotePort,
+                pairingPort = lastTv.pairingPort,
+                silentIfOffline = true
+            )
         }
     }
 
@@ -177,7 +202,7 @@ class RemoteViewModel(
     ) {
         val cleanHost = host.trim()
         if (cleanHost.isBlank()) {
-            _snackbarMessage.value = "올바른 TV IP 주소를 입력해 주세요."
+            showMessage("올바른 TV IP 주소를 입력해 주세요.")
             return
         }
         val label = tvName.ifBlank { cleanHost }
@@ -222,7 +247,7 @@ class RemoteViewModel(
                     _connectionState.value = TvConnectionState.Disconnected
                 } else {
                     _connectionState.value = TvConnectionState.Error(errMsg, cleanHost)
-                    _snackbarMessage.value = errMsg
+                    showMessage(errMsg)
                 }
             }
         }
@@ -252,11 +277,11 @@ class RemoteViewModel(
                     host = current.host,
                     remotePort = current.remotePort
                 )
-                _snackbarMessage.value = "${current.tvName}에 연결되었습니다."
+                showMessage("${current.tvName}에 연결되었습니다.")
             } else {
                 val msg = connectResult.exceptionOrNull()?.message ?: "페어링 후 연결에 실패했습니다."
                 _connectionState.value = TvConnectionState.Error(msg, current.host)
-                _snackbarMessage.value = msg
+                showMessage(msg)
             }
         }
     }
@@ -269,7 +294,7 @@ class RemoteViewModel(
     fun disconnectTv() {
         remoteClient.disconnect(notify = false)
         _connectionState.value = TvConnectionState.Disconnected
-        _snackbarMessage.value = "TV 연결이 해제되었습니다."
+        showMessage("TV 연결이 해제되었습니다.")
     }
 
     fun forgetPairedTv(host: String) {
@@ -286,8 +311,13 @@ class RemoteViewModel(
     fun sendKey(keyCode: Int) {
         if (!ensureConnectedOrPrompt()) return
         viewModelScope.launch {
-            runCatching { remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT) }
-                .onFailure { _snackbarMessage.value = it.message ?: "명령 전송 실패" }
+            runCatching {
+                if (keyCode == TvKeyCodes.ALL_APPS) {
+                    remoteClient.sendPressAndReleaseKey(keyCode)
+                } else {
+                    remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT)
+                }
+            }.onFailure { showMessage(it.message ?: "명령 전송 실패") }
         }
     }
 
@@ -335,22 +365,8 @@ class RemoteViewModel(
                     source = "REMOTE"
                 )
             }.onFailure {
-                _snackbarMessage.value = "${appName} 실행 실패: ${it.message}"
+                showMessage("${appName} 실행 실패: ${it.message}")
             }
-        }
-    }
-
-    fun executeCustomButton(button: CustomButtonEntity) {
-        if (button.actionType == CustomActionType.APP_LAUNCH.name && button.launchUri.isNotBlank()) {
-            launchApp(
-                packageName = button.packageName.ifBlank { "custom.${button.slotIndex}" },
-                appName = button.label,
-                launchUri = button.launchUri,
-                iconKey = button.iconKey,
-                accentHex = 0xFF6CD98E
-            )
-        } else if (button.keyCode > 0) {
-            sendKey(button.keyCode)
         }
     }
 
@@ -369,10 +385,10 @@ class RemoteViewModel(
             runCatching {
                 remoteClient.sendText(text, replaceExisting = replaceExisting, submitWithEnter = submitWithEnter)
                 if (submitWithEnter) {
-                    _snackbarMessage.value = "TV로 입력을 전송했습니다."
+                    showMessage("TV로 입력을 전송했습니다.")
                 }
             }.onFailure {
-                _snackbarMessage.value = "텍스트 전송 실패: ${it.message}"
+                showMessage("텍스트 전송 실패: ${it.message}")
             }
         }
     }
@@ -390,9 +406,9 @@ class RemoteViewModel(
                 remoteClient.sendKey(TvKeyCodes.SEARCH, AndroidTvRemoteClient.DIRECTION_SHORT)
                 delay(350)
                 remoteClient.sendText(spokenText, replaceExisting = true, submitWithEnter = true)
-                _snackbarMessage.value = "\"$spokenText\" 음성 검색 전송"
+                showMessage("\"$spokenText\" 음성 검색 전송")
             }.onFailure {
-                _snackbarMessage.value = "음성 검색 전송 실패: ${it.message}"
+                showMessage("음성 검색 전송 실패: ${it.message}")
             }
         }
     }
@@ -434,12 +450,6 @@ class RemoteViewModel(
         }
     }
 
-    fun updateCustomButton(button: CustomButtonEntity) {
-        viewModelScope.launch {
-            repository.updateCustomButton(button)
-        }
-    }
-
     fun stepVolume(delta: Int) {
         if (delta == 0) return
         val max = _maxVolume.value.coerceAtLeast(1)
@@ -470,17 +480,41 @@ class RemoteViewModel(
 
     fun stepBrightness(delta: Int) {
         if (delta == 0) return
+        if (!ensureConnectedOrPrompt()) return
         val current = preferences.value.brightnessPercent
         val next = (current + delta).coerceIn(5, 100)
         if (next == current) return
         setBrightnessPercent(next)
+        viewModelScope.launch {
+            val keyCode = if (delta > 0) TvKeyCodes.BRIGHTNESS_UP else TvKeyCodes.BRIGHTNESS_DOWN
+            val steps = kotlin.math.abs(delta).coerceAtMost(5)
+            repeat(steps) {
+                runCatching { remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT) }
+            }
+        }
     }
 
     fun toggleDayNightBrightness() {
+        if (!ensureConnectedOrPrompt()) return
         val current = preferences.value.brightnessPercent
         // Toggle between Night brightness (30%) and Day brightness (60%)
         val target = if (current <= 35) 60 else 30
+        val keyCode = if (target > current) TvKeyCodes.BRIGHTNESS_UP else TvKeyCodes.BRIGHTNESS_DOWN
         setBrightnessPercent(target)
+        viewModelScope.launch {
+            repeat(5) {
+                runCatching { remoteClient.sendKey(keyCode, AndroidTvRemoteClient.DIRECTION_SHORT) }
+            }
+            _snackbarNotice.value = SnackbarNotice(
+                message = "TV 밝기 ${target}% 전환 (미지원 시 화질 설정에서 조정)",
+                actionLabel = "화질 설정",
+                onAction = { openTvPictureSettings() }
+            )
+        }
+    }
+
+    fun openTvPictureSettings() {
+        sendKey(TvKeyCodes.SETTINGS)
     }
 
     private fun setBrightnessPercent(percent: Int) {
@@ -515,16 +549,16 @@ class RemoteViewModel(
     }
 
     fun clearSnackbar() {
-        _snackbarMessage.value = null
+        _snackbarNotice.value = null
     }
 
     fun showMessage(msg: String) {
-        _snackbarMessage.value = msg
+        _snackbarNotice.value = SnackbarNotice(message = msg)
     }
 
     private fun ensureConnectedOrPrompt(): Boolean {
         if (remoteClient.isConnected) return true
-        _snackbarMessage.value = "먼저 상단 TV 선택 버튼에서 Wi-Fi TV를 연결해 주세요."
+        showMessage("먼저 상단 TV 선택 버튼에서 Wi-Fi TV를 연결해 주세요.")
         openTvPicker()
         return false
     }

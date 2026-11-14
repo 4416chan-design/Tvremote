@@ -1,5 +1,6 @@
 package com.example
 
+import com.example.data.model.TvAppCatalog
 import com.example.data.model.TvKeyCodes
 import com.example.network.ProtobufWire
 import org.junit.Assert.assertEquals
@@ -56,8 +57,9 @@ class ProtobufAndCertUnitTest {
     }
 
     @Test
-    fun `remote app link launch encodes uri cleanly`() {
-        val uri = "https://www.youtube.com"
+    fun `remote app link launch encodes native market launch uri cleanly`() {
+        val uri = TvAppCatalog.launchUriForPackage("com.google.android.youtube.tv")
+        assertEquals("market://launch?id=com.google.android.youtube.tv", uri)
         val encoded = ProtobufWire.encode {
             writeMessageField(90) {
                 writeStringField(1, uri)
@@ -67,5 +69,13 @@ class ProtobufAndCertUnitTest {
         assertTrue(fields.any { it.number == 90 })
         val appLink = fields.first { it.number == 90 }.asMessage()
         assertEquals(uri, appLink.first { it.number == 1 }.asString())
+    }
+
+    @Test
+    fun `tv remote keycodes match Android KeyEvent constants`() {
+        assertEquals(284, TvKeyCodes.ALL_APPS)
+        assertEquals(176, TvKeyCodes.SETTINGS)
+        assertEquals(220, TvKeyCodes.BRIGHTNESS_DOWN)
+        assertEquals(221, TvKeyCodes.BRIGHTNESS_UP)
     }
 }

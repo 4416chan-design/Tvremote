@@ -16,40 +16,6 @@ class TvRemoteRepository(private val db: AppDatabase) {
         .map { it ?: AppPreferencesEntity() }
 
     suspend fun ensureDefaultsInitialized() {
-        if (db.customButtonDao().count() == 0) {
-            db.customButtonDao().upsertAll(
-                listOf(
-                    CustomButtonEntity(
-                        slotIndex = 0,
-                        label = "외부입력",
-                        iconKey = "input",
-                        actionType = CustomActionType.KEYCODE.name,
-                        keyCode = TvKeyCodes.TV_INPUT
-                    ),
-                    CustomButtonEntity(
-                        slotIndex = 1,
-                        label = "자막",
-                        iconKey = "captions",
-                        actionType = CustomActionType.KEYCODE.name,
-                        keyCode = TvKeyCodes.CAPTIONS
-                    ),
-                    CustomButtonEntity(
-                        slotIndex = 2,
-                        label = "채널 +",
-                        iconKey = "channel_up",
-                        actionType = CustomActionType.KEYCODE.name,
-                        keyCode = TvKeyCodes.CHANNEL_UP
-                    ),
-                    CustomButtonEntity(
-                        slotIndex = 3,
-                        label = "정보",
-                        iconKey = "info",
-                        actionType = CustomActionType.KEYCODE.name,
-                        keyCode = TvKeyCodes.INFO
-                    )
-                )
-            )
-        }
         if (db.favoriteAppDao().count() == 0) {
             val starter = TvAppCatalog.apps.take(3).mapIndexed { index, app ->
                 FavoriteAppEntity(
@@ -62,6 +28,26 @@ class TvRemoteRepository(private val db: AppDatabase) {
                 )
             }
             db.favoriteAppDao().upsertAll(starter)
+        } else {
+            val existingFavs = db.favoriteAppDao().getAllFavoritesOnce()
+            val migratedFavs = existingFavs.mapNotNull { fav ->
+                if (!fav.launchUri.startsWith("market://launch")) {
+                    fav.copy(launchUri = TvAppCatalog.launchUriForPackage(fav.packageName))
+                } else null
+            }
+            if (migratedFavs.isNotEmpty()) {
+                db.favoriteAppDao().upsertAll(migratedFavs)
+            }
+        }
+
+        val existingRecents = db.recentTvAppDao().getRecentAppsOnce()
+        val migratedRecents = existingRecents.mapNotNull { rec ->
+            if (!rec.launchUri.startsWith("market://launch")) {
+                rec.copy(launchUri = TvAppCatalog.launchUriForPackage(rec.packageName))
+            } else null
+        }
+        if (migratedRecents.isNotEmpty()) {
+            db.recentTvAppDao().upsertAll(migratedRecents)
         }
     }
 

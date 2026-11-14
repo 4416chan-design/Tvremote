@@ -36,16 +36,15 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Apps
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.WbSunny
-import androidx.compose.material.icons.rounded.WifiFind
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -65,41 +64,34 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.R
-import com.example.data.local.CustomButtonEntity
 import com.example.data.local.FavoriteAppEntity
 import com.example.data.model.TvConnectionState
 import com.example.data.model.TvKeyCodes
 import com.example.ui.components.CircularDpadController
 import com.example.ui.components.FullBullnoseDialSlider
 import com.example.ui.components.TvAppBadgeIcon
-import com.example.ui.components.customActionIcon
 import com.example.ui.theme.CharcoalBg
+import com.example.ui.theme.CharcoalBorder
 import com.example.ui.theme.CharcoalSurface
-import com.example.ui.theme.CharcoalSurfaceElevated
 import com.example.ui.theme.CharcoalWell
-import com.example.ui.theme.DividerSubtle
 import com.example.ui.theme.ErrorCoral
 import com.example.ui.theme.MintGreen
 import com.example.ui.theme.MintGreenContainer
 import com.example.ui.theme.OnMintGreen
 import com.example.ui.theme.TextPrimary
+import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WarningAmber
 
 @Composable
 fun RemoteScreen(
     connectionState: TvConnectionState,
     favoriteApps: List<FavoriteAppEntity>,
-    customButtons: List<CustomButtonEntity>,
     volumeLevel: Int,
     maxVolume: Int,
     isMuted: Boolean,
@@ -108,7 +100,6 @@ fun RemoteScreen(
     isVoiceListening: Boolean,
     snackbarHostState: SnackbarHostState,
     onOpenTvPicker: () -> Unit,
-    onDisconnectTv: () -> Unit,
     onKeyPress: (Int) -> Unit,
     onLaunchFavorite: (FavoriteAppEntity) -> Unit,
     onOpenKeyboard: () -> Unit,
@@ -118,12 +109,12 @@ fun RemoteScreen(
     onStepVolume: (Int) -> Unit,
     onToggleDayNightBrightness: () -> Unit,
     onStepBrightness: (Int) -> Unit,
-    onExecuteCustomButton: (CustomButtonEntity) -> Unit
+    onOpenTvPictureSettings: () -> Unit
 ) {
-    val haptic = LocalHapticFeedback.current
+    val hapticHelper = rememberHapticHelper()
     fun triggerHaptic() {
         if (hapticEnabled) {
-            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            hapticHelper.vibrateClick()
         }
     }
 
@@ -146,12 +137,12 @@ fun RemoteScreen(
             contentAlignment = Alignment.TopCenter
         ) {
             val compactHeight = maxHeight < 710.dp
-            val dpadDiameter = (maxHeight * 0.28f).coerceIn(186.dp, 242.dp)
-            val bigCircleSize = if (compactHeight) 62.dp else 70.dp
-            val rowGap = if (compactHeight) 10.dp else 13.dp
-            val sliderHeight = if (compactHeight) 48.dp else 54.dp
+            val dpadDiameter = (maxHeight * 0.28f).coerceIn(184.dp, 240.dp)
+            val bigCircleSize = if (compactHeight) 56.dp else 64.dp
+            val rowGap = if (compactHeight) 10.dp else 14.dp
+            val sliderHeight = if (compactHeight) 46.dp else 52.dp
 
-            val scrollModifier = if (maxHeight < 650.dp) {
+            val scrollModifier = if (maxHeight < 640.dp) {
                 Modifier.verticalScroll(rememberScrollState())
             } else {
                 Modifier
@@ -159,23 +150,19 @@ fun RemoteScreen(
 
             Column(
                 modifier = Modifier
-                    .widthIn(max = 520.dp)
+                    .widthIn(max = 500.dp)
                     .fillMaxSize()
                     .then(scrollModifier)
-                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.SpaceBetween
             ) {
-                // 1. Top Header: Search/Disconnect Circle | Mint Green Full Bullnose TV Pill | Power Circle
+                // 1. Top Header: Star Favorites Edit Circle | TV Status Pill | Power Circle
                 TopRemoteHeader(
                     connectionState = connectionState,
-                    onLeftAction = {
+                    onFavoritesEditClick = {
                         triggerHaptic()
-                        if (connectionState is TvConnectionState.Connected) {
-                            onDisconnectTv()
-                        } else {
-                            onOpenTvPicker()
-                        }
+                        onOpenSettings()
                     },
                     onTvSelectorClick = {
                         triggerHaptic()
@@ -187,131 +174,11 @@ fun RemoteScreen(
                     }
                 )
 
-                // 2. Top Favorites Chip Bar (Icon + Text Full Bullnose Chips)
-                FavoritesChipBar(
-                    favorites = favoriteApps,
-                    onFavoriteClick = { app ->
-                        triggerHaptic()
-                        onLaunchFavorite(app)
-                    },
-                    onAddClick = {
-                        triggerHaptic()
-                        onOpenSettings()
-                    }
-                )
-
-                // 3. Middle Circular D-Pad
-                CircularDpadController(
-                    diameter = dpadDiameter,
-                    onKeyPress = { code ->
-                        triggerHaptic()
-                        onKeyPress(code)
-                    }
-                )
-
-                // 4. Bottom Controls Block
+                // 2. Top Sliders Block: Volume + TV Brightness (Full Bullnose Pill Sliders)
                 Column(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(rowGap),
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // Row 1: Big Circle 3 (키보드 | 홈 | 뒤로가기)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        CircleIconRemoteButton(
-                            icon = Icons.Rounded.Keyboard,
-                            contentDescription = stringResource(R.string.btn_keyboard),
-                            size = bigCircleSize,
-                            iconSize = 28.dp,
-                            testTag = "btn_keyboard",
-                            onClick = {
-                                triggerHaptic()
-                                onOpenKeyboard()
-                            }
-                        )
-
-                        CircleIconRemoteButton(
-                            icon = Icons.Rounded.Home,
-                            contentDescription = stringResource(R.string.btn_home),
-                            size = bigCircleSize,
-                            iconSize = 28.dp,
-                            testTag = "btn_home",
-                            onClick = {
-                                triggerHaptic()
-                                onKeyPress(TvKeyCodes.HOME)
-                            }
-                        )
-
-                        CircleIconRemoteButton(
-                            icon = Icons.AutoMirrored.Rounded.ArrowBack,
-                            contentDescription = stringResource(R.string.btn_back),
-                            size = bigCircleSize,
-                            iconSize = 28.dp,
-                            testTag = "btn_back",
-                            onClick = {
-                                triggerHaptic()
-                                onKeyPress(TvKeyCodes.BACK)
-                            }
-                        )
-                    }
-
-                    // Row 2: Big Circle 3 (마이크 | Apps | 설정)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        val micBg by animateColorAsState(
-                            targetValue = if (isVoiceListening) MintGreen else CharcoalWell,
-                            label = "mic_bg"
-                        )
-                        val micTint by animateColorAsState(
-                            targetValue = if (isVoiceListening) OnMintGreen else TextPrimary,
-                            label = "mic_tint"
-                        )
-                        CircleIconRemoteButton(
-                            icon = Icons.Rounded.Mic,
-                            contentDescription = stringResource(R.string.btn_mic),
-                            size = bigCircleSize,
-                            iconSize = 28.dp,
-                            containerColor = micBg,
-                            iconTint = micTint,
-                            testTag = "btn_mic",
-                            onClick = {
-                                triggerHaptic()
-                                onMicClick()
-                            }
-                        )
-
-                        CircleIconRemoteButton(
-                            icon = Icons.Rounded.Apps,
-                            contentDescription = stringResource(R.string.btn_apps),
-                            size = bigCircleSize,
-                            iconSize = 28.dp,
-                            testTag = "btn_apps",
-                            onClick = {
-                                triggerHaptic()
-                                onKeyPress(TvKeyCodes.ALL_APPS)
-                            }
-                        )
-
-                        CircleIconRemoteButton(
-                            icon = Icons.Rounded.Settings,
-                            contentDescription = stringResource(R.string.btn_settings),
-                            size = bigCircleSize,
-                            iconSize = 28.dp,
-                            testTag = "btn_settings",
-                            onClick = {
-                                triggerHaptic()
-                                onOpenSettings()
-                            }
-                        )
-                    }
-
-                    // Row 3: Full Bullnose Volume Dial Slider (Mute Toggle Icon | Smooth +1/-1 Drag Slider | Volume Number)
                     FullBullnoseDialSlider(
                         icon = if (isMuted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
                         iconContentDescription = stringResource(R.string.cd_mute),
@@ -331,11 +198,10 @@ fun RemoteScreen(
                         onStep = onStepVolume
                     )
 
-                    // Row 4: Full Bullnose Screen Brightness Slider (Sun Icon Toggle 30%/60% | Smooth +1/-1 Drag Slider | Brightness %)
                     val isNightMode = brightnessPercent <= 35
                     FullBullnoseDialSlider(
                         icon = Icons.Rounded.WbSunny,
-                        iconContentDescription = "화면 밝기 전환 (야간 30% / 낮 60%)",
+                        iconContentDescription = "TV 밝기 전환 (탭: 야간 30% / 낮 60%, 길게: TV 화질 설정)",
                         iconActive = !isNightMode,
                         value = brightnessPercent,
                         minValue = 5,
@@ -349,18 +215,137 @@ fun RemoteScreen(
                         sliderTestTag = "brightness_dial_slider",
                         valueTestTag = "brightness_value_text",
                         onIconClick = onToggleDayNightBrightness,
+                        onIconLongClick = onOpenTvPictureSettings,
                         onStep = onStepBrightness
                     )
+                }
 
-                    // Row 5: 4 Custom Function Buttons (Full Bullnose Pill Buttons)
-                    CustomButtonsRow(
-                        buttons = customButtons,
-                        compact = compactHeight,
-                        onButtonClick = { btn ->
-                            triggerHaptic()
-                            onExecuteCustomButton(btn)
-                        }
-                    )
+                // 3. Favorites Chip Bar (App-colored Full Bullnose Pills + Trailing Mint '+' Circle)
+                FavoritesChipBar(
+                    favorites = favoriteApps,
+                    onFavoriteClick = { app ->
+                        triggerHaptic()
+                        onLaunchFavorite(app)
+                    },
+                    onAddClick = {
+                        triggerHaptic()
+                        onOpenSettings()
+                    }
+                )
+
+                // 4. Center Circular D-Pad
+                CircularDpadController(
+                    diameter = dpadDiameter,
+                    onKeyPress = { code ->
+                        triggerHaptic()
+                        onKeyPress(code)
+                    }
+                )
+
+                // 5. Bottom 2x3 Circular Action Grid
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(rowGap),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // Row 1: 키보드 | 홈 | 뒤로가기
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircleIconRemoteButton(
+                            icon = Icons.Rounded.Keyboard,
+                            contentDescription = stringResource(R.string.btn_keyboard),
+                            size = bigCircleSize,
+                            iconSize = 26.dp,
+                            testTag = "btn_keyboard",
+                            onClick = {
+                                triggerHaptic()
+                                onOpenKeyboard()
+                            }
+                        )
+
+                        CircleIconRemoteButton(
+                            icon = Icons.Rounded.Home,
+                            contentDescription = stringResource(R.string.btn_home),
+                            size = bigCircleSize,
+                            iconSize = 26.dp,
+                            testTag = "btn_home",
+                            onClick = {
+                                triggerHaptic()
+                                onKeyPress(TvKeyCodes.HOME)
+                            }
+                        )
+
+                        CircleIconRemoteButton(
+                            icon = Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = stringResource(R.string.btn_back),
+                            size = bigCircleSize,
+                            iconSize = 26.dp,
+                            testTag = "btn_back",
+                            onClick = {
+                                triggerHaptic()
+                                onKeyPress(TvKeyCodes.BACK)
+                            }
+                        )
+                    }
+
+                    // Row 2: 마이크 | Apps | TV 설정
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val micBg by animateColorAsState(
+                            targetValue = if (isVoiceListening) MintGreen else CharcoalSurface,
+                            label = "mic_bg"
+                        )
+                        val micTint by animateColorAsState(
+                            targetValue = if (isVoiceListening) OnMintGreen else TextPrimary,
+                            label = "mic_tint"
+                        )
+                        CircleIconRemoteButton(
+                            icon = Icons.Rounded.Mic,
+                            contentDescription = stringResource(R.string.btn_mic),
+                            size = bigCircleSize,
+                            iconSize = 26.dp,
+                            containerColor = micBg,
+                            iconTint = micTint,
+                            borderColor = if (isVoiceListening) MintGreen else CharcoalBorder,
+                            testTag = "btn_mic",
+                            onClick = {
+                                triggerHaptic()
+                                onMicClick()
+                            }
+                        )
+
+                        CircleIconRemoteButton(
+                            icon = Icons.Rounded.Apps,
+                            contentDescription = stringResource(R.string.btn_apps),
+                            size = bigCircleSize,
+                            iconSize = 26.dp,
+                            testTag = "btn_apps",
+                            onClick = {
+                                triggerHaptic()
+                                onKeyPress(TvKeyCodes.ALL_APPS)
+                            }
+                        )
+
+                        CircleIconRemoteButton(
+                            icon = Icons.Rounded.Settings,
+                            contentDescription = stringResource(R.string.btn_settings),
+                            size = bigCircleSize,
+                            iconSize = 26.dp,
+                            testTag = "btn_settings",
+                            onClick = {
+                                triggerHaptic()
+                                onKeyPress(TvKeyCodes.SETTINGS)
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -370,7 +355,7 @@ fun RemoteScreen(
 @Composable
 private fun TopRemoteHeader(
     connectionState: TvConnectionState,
-    onLeftAction: () -> Unit,
+    onFavoritesEditClick: () -> Unit,
     onTvSelectorClick: () -> Unit,
     onPowerClick: () -> Unit
 ) {
@@ -381,10 +366,18 @@ private fun TopRemoteHeader(
         targetValue = when (connectionState) {
             is TvConnectionState.Connected -> MintGreen
             is TvConnectionState.Connecting -> MintGreenContainer
-            is TvConnectionState.Error -> CharcoalSurface
-            else -> CharcoalSurfaceElevated
+            else -> CharcoalSurface
         },
         label = "tv_pill_color"
+    )
+    val pillBorderColor by animateColorAsState(
+        targetValue = when (connectionState) {
+            is TvConnectionState.Connected -> MintGreen
+            is TvConnectionState.Connecting -> MintGreen.copy(alpha = 0.55f)
+            is TvConnectionState.Error -> ErrorCoral.copy(alpha = 0.65f)
+            else -> CharcoalBorder
+        },
+        label = "tv_pill_border"
     )
     val pillContentColor = when (connectionState) {
         is TvConnectionState.Connected -> OnMintGreen
@@ -392,11 +385,17 @@ private fun TopRemoteHeader(
         is TvConnectionState.Error -> ErrorCoral
         else -> TextPrimary
     }
+    val pillIconTint = when (connectionState) {
+        is TvConnectionState.Connected -> OnMintGreen
+        is TvConnectionState.Connecting -> MintGreen
+        is TvConnectionState.Error -> ErrorCoral
+        else -> TextSecondary
+    }
     val pillLabel = when (connectionState) {
         is TvConnectionState.Connected -> connectionState.tvName
         is TvConnectionState.Connecting -> "${connectionState.tvName} 연결 중..."
         is TvConnectionState.PairingRequired -> "${connectionState.tvName} PIN 대기"
-        is TvConnectionState.Error -> "연결 재시도"
+        is TvConnectionState.Error -> stringResource(R.string.tv_select_needed)
         TvConnectionState.Disconnected -> stringResource(R.string.tv_select_needed)
     }
 
@@ -406,28 +405,25 @@ private fun TopRemoteHeader(
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         CircleIconRemoteButton(
-            icon = if (isConnected) Icons.Rounded.Close else Icons.Rounded.WifiFind,
-            contentDescription = if (isConnected) {
-                stringResource(R.string.cd_disconnect_tv)
-            } else {
-                stringResource(R.string.cd_search_tv)
-            },
+            icon = Icons.Rounded.Star,
+            contentDescription = stringResource(R.string.cd_favorites_edit),
             size = 48.dp,
             iconSize = 22.dp,
             containerColor = CharcoalSurface,
             iconTint = TextPrimary,
-            testTag = "btn_top_connection",
-            onClick = onLeftAction
+            testTag = "btn_favorites_edit",
+            onClick = onFavoritesEditClick
         )
 
-        // Full Bullnose Mint Green TV Selector Pill
+        // Full Bullnose TV Selector Pill
         Surface(
             color = pillColor,
             shape = CircleShape,
             modifier = Modifier
                 .height(48.dp)
-                .widthIn(min = 168.dp, max = 240.dp)
+                .widthIn(min = 148.dp, max = 216.dp)
                 .clip(CircleShape)
+                .border(1.dp, pillBorderColor, CircleShape)
                 .clickable(onClick = onTvSelectorClick)
                 .testTag("btn_tv_selector_pill")
         ) {
@@ -446,7 +442,7 @@ private fun TopRemoteHeader(
                     Icon(
                         imageVector = Icons.Rounded.Tv,
                         contentDescription = null,
-                        tint = pillContentColor,
+                        tint = pillIconTint,
                         modifier = Modifier.size(18.dp)
                     )
                 }
@@ -459,19 +455,12 @@ private fun TopRemoteHeader(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false)
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Box(
-                    modifier = Modifier
-                        .width(1.dp)
-                        .height(20.dp)
-                        .background(pillContentColor.copy(alpha = 0.25f))
-                )
                 Spacer(modifier = Modifier.width(6.dp))
                 Icon(
                     imageVector = Icons.Rounded.KeyboardArrowDown,
                     contentDescription = "TV 목록 열기",
-                    tint = pillContentColor,
-                    modifier = Modifier.size(20.dp)
+                    tint = if (isConnected) OnMintGreen else TextSecondary,
+                    modifier = Modifier.size(18.dp)
                 )
             }
         }
@@ -502,13 +491,14 @@ private fun FavoritesChipBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         items(favorites, key = { it.packageName }) { app ->
+            val accentColor = Color(app.accentHex)
             Surface(
                 color = CharcoalWell,
                 shape = CircleShape,
                 modifier = Modifier
                     .height(48.dp)
                     .clip(CircleShape)
-                    .border(1.dp, DividerSubtle, CircleShape)
+                    .border(1.dp, accentColor.copy(alpha = 0.65f), CircleShape)
                     .clickable { onFavoriteClick(app) }
                     .testTag("favorite_chip_${app.iconKey}")
             ) {
@@ -535,110 +525,26 @@ private fun FavoritesChipBar(
         }
 
         item {
-            Surface(
-                color = CharcoalSurface,
-                shape = CircleShape,
+            Box(
                 modifier = Modifier
-                    .height(48.dp)
+                    .minimumInteractiveComponentSize()
+                    .size(48.dp)
                     .clip(CircleShape)
-                    .border(1.dp, MintGreen.copy(alpha = 0.35f), CircleShape)
-                    .clickable(onClick = onAddClick)
-                    .testTag("favorite_chip_add")
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(horizontal = 14.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Add,
-                        contentDescription = null,
-                        tint = MintGreen,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = if (favorites.isEmpty()) stringResource(R.string.add_favorite_chip) else "편집",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MintGreen
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CustomButtonsRow(
-    buttons: List<CustomButtonEntity>,
-    compact: Boolean,
-    onButtonClick: (CustomButtonEntity) -> Unit
-) {
-    val slots = remember(buttons) {
-        (0..3).map { idx ->
-            buttons.firstOrNull { it.slotIndex == idx } ?: CustomButtonEntity(
-                slotIndex = idx,
-                label = "버튼 ${idx + 1}",
-                iconKey = "apps",
-                actionType = "KEYCODE",
-                keyCode = TvKeyCodes.INFO
-            )
-        }
-    }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        slots.forEach { btn ->
-            val interaction = remember { MutableInteractionSource() }
-            val pressed by interaction.collectIsPressedAsState()
-            val scale by animateFloatAsState(
-                targetValue = if (pressed) 0.94f else 1f,
-                animationSpec = spring(stiffness = 650f),
-                label = "custom_btn_scale"
-            )
-
-            Surface(
-                color = CharcoalSurface,
-                shape = CircleShape,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(if (compact) 48.dp else 50.dp)
-                    .scale(scale)
-                    .clip(CircleShape)
-                    .border(1.dp, DividerSubtle, CircleShape)
+                    .background(CharcoalWell)
+                    .border(1.dp, MintGreen.copy(alpha = 0.72f), CircleShape)
                     .clickable(
-                        interactionSource = interaction,
-                        indication = ripple(bounded = true, color = MintGreen),
-                        onClickLabel = btn.label,
-                        onClick = { onButtonClick(btn) }
+                        onClickLabel = stringResource(R.string.add_favorite_chip),
+                        onClick = onAddClick
                     )
-                    .testTag("custom_button_${btn.slotIndex}")
+                    .testTag("favorite_chip_add"),
+                contentAlignment = Alignment.Center
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier.padding(horizontal = 8.dp)
-                ) {
-                    Icon(
-                        imageVector = customActionIcon(btn.iconKey),
-                        contentDescription = btn.label,
-                        tint = MintGreen,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(
-                        text = btn.label,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        ),
-                        color = TextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = stringResource(R.string.add_favorite_chip),
+                    tint = MintGreen,
+                    modifier = Modifier.size(20.dp)
+                )
             }
         }
     }
@@ -651,8 +557,10 @@ private fun CircleIconRemoteButton(
     size: Dp,
     iconSize: Dp,
     testTag: String,
-    containerColor: Color = CharcoalWell,
+    modifier: Modifier = Modifier,
+    containerColor: Color = CharcoalSurface,
     iconTint: Color = TextPrimary,
+    borderColor: Color = CharcoalBorder,
     onClick: () -> Unit
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -664,13 +572,13 @@ private fun CircleIconRemoteButton(
     )
 
     Box(
-        modifier = Modifier
+        modifier = modifier
             .minimumInteractiveComponentSize()
             .size(size)
             .scale(scale)
             .clip(CircleShape)
             .background(containerColor)
-            .border(1.dp, Color(0xFF2B2D31), CircleShape)
+            .border(1.dp, borderColor, CircleShape)
             .clickable(
                 interactionSource = interaction,
                 indication = ripple(bounded = true, color = MintGreen),

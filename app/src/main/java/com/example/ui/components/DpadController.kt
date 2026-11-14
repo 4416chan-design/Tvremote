@@ -51,8 +51,8 @@ fun CircularDpadController(
     onKeyPress: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val centerSize = diameter * 0.37f
-    val arrowOffset = diameter * 0.335f
+    val centerSize = diameter * 0.36f
+    val arrowOffset = diameter * 0.34f
     val sectorHitSize = (diameter * 0.28f).coerceAtLeast(52.dp)
 
     Box(
@@ -61,11 +61,11 @@ fun CircularDpadController(
             .shadow(elevation = 10.dp, shape = CircleShape, clip = false)
             .clip(CircleShape)
             .background(
-                brush = Brush.radialGradient(
+                brush = Brush.verticalGradient(
                     colors = listOf(DpadInnerRing, DpadRing)
                 )
             )
-            .border(width = 1.dp, color = Color(0xFF2E3034), shape = CircleShape),
+            .border(width = 1.dp, color = Color(0xFF3A3D43), shape = CircleShape),
         contentAlignment = Alignment.Center
     ) {
         // Up
@@ -128,23 +128,15 @@ fun CircularDpadController(
                 .shadow(elevation = 6.dp, shape = CircleShape)
                 .clip(CircleShape)
                 .background(centerColor)
-                .border(1.dp, Color(0xFF66686D), CircleShape)
+                .border(1.dp, Color(0xFF5A5E66), CircleShape)
                 .clickable(
                     interactionSource = centerInteraction,
                     indication = ripple(bounded = true, color = MintGreen),
                     onClickLabel = stringResource(R.string.cd_dpad_ok),
                     onClick = { onKeyPress(TvKeyCodes.DPAD_CENTER) }
                 )
-                .testTag("dpad_ok_button"),
-            contentAlignment = Alignment.Center
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .clip(CircleShape)
-                    .background(if (centerPressed) MintGreen else Color(0xFF6F7277))
-            )
-        }
+                .testTag("dpad_ok_button")
+        )
     }
 }
 
@@ -183,8 +175,8 @@ private fun DpadDirectionButton(
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = if (pressed) TextPrimary else TextSecondary,
-            modifier = Modifier.size(34.dp)
+            tint = if (pressed) MintGreen else TextPrimary,
+            modifier = Modifier.size(28.dp)
         )
     }
 }

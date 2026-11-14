@@ -30,6 +30,13 @@ val TvRemoteTypography = Typography(
         lineHeight = 28.sp,
         letterSpacing = (-0.2).sp
     ),
+    titleLarge = TextStyle(
+        fontFamily = DisplaySansFontFamily,
+        fontWeight = FontWeight.Bold,
+        fontSize = 19.sp,
+        lineHeight = 26.sp,
+        letterSpacing = (-0.1).sp
+    ),
     titleMedium = TextStyle(
         fontFamily = DisplaySansFontFamily,
         fontWeight = FontWeight.SemiBold,
@@ -56,6 +63,13 @@ val TvRemoteTypography = Typography(
         fontWeight = FontWeight.Normal,
         fontSize = 13.sp,
         lineHeight = 18.sp,
+        letterSpacing = 0.2.sp
+    ),
+    bodySmall = TextStyle(
+        fontFamily = BodySansFontFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
         letterSpacing = 0.2.sp
     ),
     labelLarge = TextStyle(

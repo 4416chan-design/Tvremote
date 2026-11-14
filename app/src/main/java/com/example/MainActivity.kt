@@ -13,13 +13,17 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -60,7 +64,6 @@ class MainActivity : ComponentActivity() {
                 val scanError by viewModel.scanError.collectAsStateWithLifecycle()
                 val favoriteApps by viewModel.favoriteApps.collectAsStateWithLifecycle()
                 val recentApps by viewModel.recentApps.collectAsStateWithLifecycle()
-                val customButtons by viewModel.customButtons.collectAsStateWithLifecycle()
                 val preferences by viewModel.preferences.collectAsStateWithLifecycle()
                 val volumeLevel by viewModel.volumeLevel.collectAsStateWithLifecycle()
                 val maxVolume by viewModel.maxVolume.collectAsStateWithLifecycle()
@@ -69,17 +72,22 @@ class MainActivity : ComponentActivity() {
                 val isKeyboardSheetVisible by viewModel.isKeyboardSheetVisible.collectAsStateWithLifecycle()
                 val isTvPickerVisible by viewModel.isTvPickerVisible.collectAsStateWithLifecycle()
                 val isVoiceListening by viewModel.isVoiceListening.collectAsStateWithLifecycle()
-                val snackbarMessage by viewModel.snackbarMessage.collectAsStateWithLifecycle()
+                val snackbarNotice by viewModel.snackbarNotice.collectAsStateWithLifecycle()
 
-                LaunchedEffect(preferences.brightnessPercent) {
-                    val lp = window.attributes
-                    lp.screenBrightness = preferences.brightnessPercent.coerceIn(5, 100) / 100f
-                    window.attributes = lp
+                LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+                    viewModel.autoReconnectIfNeeded()
                 }
 
-                LaunchedEffect(snackbarMessage) {
-                    val msg = snackbarMessage ?: return@LaunchedEffect
-                    snackbarHostState.showSnackbar(msg)
+                LaunchedEffect(snackbarNotice) {
+                    val notice = snackbarNotice ?: return@LaunchedEffect
+                    val result = snackbarHostState.showSnackbar(
+                        message = notice.message,
+                        actionLabel = notice.actionLabel,
+                        duration = if (notice.actionLabel != null) SnackbarDuration.Long else SnackbarDuration.Short
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        notice.onAction?.invoke()
+                    }
                     viewModel.clearSnackbar()
                 }
 
@@ -183,7 +191,6 @@ class MainActivity : ComponentActivity() {
                         RemoteScreen(
                             connectionState = connectionState,
                             favoriteApps = favoriteApps,
-                            customButtons = customButtons,
                             volumeLevel = volumeLevel,
                             maxVolume = maxVolume,
                             isMuted = isMuted,
@@ -192,7 +199,6 @@ class MainActivity : ComponentActivity() {
                             isVoiceListening = isVoiceListening,
                             snackbarHostState = snackbarHostState,
                             onOpenTvPicker = viewModel::openTvPicker,
-                            onDisconnectTv = viewModel::disconnectTv,
                             onKeyPress = viewModel::sendKey,
                             onLaunchFavorite = viewModel::launchFavorite,
                             onOpenKeyboard = viewModel::openKeyboardSheet,
@@ -202,7 +208,7 @@ class MainActivity : ComponentActivity() {
                             onStepVolume = viewModel::stepVolume,
                             onToggleDayNightBrightness = viewModel::toggleDayNightBrightness,
                             onStepBrightness = viewModel::stepBrightness,
-                            onExecuteCustomButton = viewModel::executeCustomButton
+                            onOpenTvPictureSettings = viewModel::openTvPictureSettings
                         )
                     }
 
@@ -210,7 +216,6 @@ class MainActivity : ComponentActivity() {
                         SettingsScreen(
                             favoriteApps = favoriteApps,
                             recentApps = recentApps,
-                            customButtons = customButtons,
                             pairedTvs = pairedTvs,
                             preferences = preferences,
                             onNavigateBack = { navController.popBackStack() },
@@ -219,7 +224,6 @@ class MainActivity : ComponentActivity() {
                             onAddCustomFavorite = viewModel::addCustomFavoriteApp,
                             onRemoveFavorite = viewModel::removeFavorite,
                             onMoveFavorite = viewModel::moveFavorite,
-                            onUpdateCustomButton = viewModel::updateCustomButton,
                             onConnectSavedTv = { tv ->
                                 viewModel.connectToTv(tv.host, tv.name, tv.remotePort, tv.pairingPort)
                                 navController.popBackStack()
